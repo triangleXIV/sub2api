@@ -143,6 +143,14 @@ const formatSystemLogDetail = (row: OpsSystemLog) => {
   if (protocol) accessParts.push(`proto=${protocol}`)
   if (accessParts.length > 0) parts.push(accessParts.join(' '))
 
+  // 路由亲和信息：区分「亲和命中」与「随机/负载均衡选号」。
+  const routingLayer = getExtraString(extra, 'routing_layer')
+  const stickyHit = getExtraString(extra, 'sticky_hit')
+  const routingParts: string[] = []
+  if (routingLayer) routingParts.push(`routing_layer=${routingLayer}`)
+  if (stickyHit) routingParts.push(`sticky_hit=${stickyHit}`)
+  if (routingParts.length > 0) parts.push(routingParts.join(' '))
+
   const corrParts: string[] = []
   if (row.request_id) corrParts.push(`req=${row.request_id}`)
   if (row.client_request_id) corrParts.push(`client_req=${row.client_request_id}`)

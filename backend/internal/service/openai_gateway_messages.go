@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -35,7 +36,8 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 ) (*OpenAIForwardResult, error) {
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
-	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
+	msgBodyModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, msgBodyModel) {
 		SetActualOpenAIUpstreamEndpoint(c, "/v1/chat/completions")
 	}
 	setCodexToolNameReverse(c, nil)
@@ -54,7 +56,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 
 	// 固定 chat_completions 的 CN 账号，以及不支持 Responses 的其他 APIKey
 	// 账号，均将 Messages 转为 CC；固定 responses 的 CN 账号不受探针旧值覆盖。
-	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
+	if shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, msgBodyModel) {
 		return s.forwardAnthropicViaRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 	}
 
@@ -433,6 +435,23 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	// 8. Handle error response with failover
 	if resp.StatusCode >= 400 {
 		respBody, upstreamMsg := s.readOpenAIUpstreamError(resp)
+		// 上游「当前模型不支持 Responses API」：转一次 Chat Completions 直转路径
+		// 重试（Claude Code 走 /v1/messages 时同样会踩模型级 Responses 能力差异），
+		// 并记住 (账号, 模型) 避免后续轮次反复 400。
+		if account.Type == AccountTypeAPIKey &&
+			isOpenAIResponsesNotSupportedUpstreamError(resp.StatusCode, upstreamMsg, respBody) {
+			markOpenAIResponsesModelChatOnly(account.ID, originalModel)
+			logger.LegacyPrintf("service.openai_gateway",
+				"[OpenAI] Upstream does not support Responses API for model %s (account: %s, status: %d); retrying messages via chat completions bridge",
+				originalModel, account.Name, resp.StatusCode)
+			slog.Warn("openai_responses_model_chat_only_fallback",
+				"account_id", account.ID,
+				"account_name", account.Name,
+				"model", originalModel,
+				"upstream_status", resp.StatusCode,
+			)
+			return s.forwardAnthropicViaRawChatCompletions(ctx, c, account, body, defaultMappedModel)
+		}
 		if !agentIdentityTaskRecoveryWasTried(ctx) && s.isAgentIdentityAccount(ctx, account) && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, respBody) {
 			expectedTaskID := account.GetCredential("task_id")
 			if err := s.recoverAgentIdentityTask(ctx, account, expectedTaskID); err != nil {

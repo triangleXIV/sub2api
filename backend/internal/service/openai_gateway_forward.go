@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -21,7 +22,7 @@ import (
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
-	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
+	if shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, strings.TrimSpace(gjson.GetBytes(body, "model").String())) {
 		SetActualOpenAIUpstreamEndpoint(c, "/v1/chat/completions")
 	}
 	filteredBody, filterErr := filterOpenAIResponsesNoneReasoningEffortForAccount(account, body)
@@ -178,7 +179,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		originalModel = reqModel
 	}
 
-	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
+	if shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, reqModel) {
 		return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
 	}
 	if account.IsOpenAI() && (account.IsOpenAIApiKey() || account.IsOpenAIOAuthLike()) {
@@ -241,6 +242,12 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			})
 		}
 		return nil, errors.New("openai ws v1 is temporarily unsupported; use ws v2")
+	}
+	// 模型级 Responses 能力门：上游对该模型不支持 /v1/responses（已学习或管理员钉死）
+	// 时，即使账号开启了透传也直接走 Chat Completions 直转，避免白挨一次上游 400。
+	if account.Type == AccountTypeAPIKey &&
+		shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, reqModel) {
+		return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
 	}
 	if passthroughEnabled {
 		attemptImageIntentInvalidated := false
@@ -978,6 +985,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	httpInvalidEncryptedContentRetryTried := false
 	compactModelFallbackRetried := false
 	agentTaskRecoveryTried := false
+	responsesChatFallbackTried := false
 	rejectedFieldRetryState := openAIResponsesRejectedFieldRetryStateForRequest(c, body)
 	for {
 		// Build upstream request
@@ -1045,6 +1053,24 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 			upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 			upstreamCode := extractUpstreamErrorCode(respBody)
+			// 上游「当前模型不支持 Responses API」：模型级能力缺失，不是账号故障。
+			// 同请求内转一次 Chat Completions 直转路径重试，并记住 (账号, 模型)，
+			// 让 TTL 内的后续轮次直接走直转，不再白挨 400。
+			if !responsesChatFallbackTried && account.Type == AccountTypeAPIKey &&
+				isOpenAIResponsesNotSupportedUpstreamError(resp.StatusCode, upstreamMsg, respBody) {
+				responsesChatFallbackTried = true
+				markOpenAIResponsesModelChatOnly(account.ID, reqModel)
+				logger.LegacyPrintf("service.openai_gateway",
+					"[OpenAI] Upstream does not support Responses API for model %s (account: %s, status: %d); retrying via chat completions bridge",
+					reqModel, account.Name, resp.StatusCode)
+				slog.Warn("openai_responses_model_chat_only_fallback",
+					"account_id", account.ID,
+					"account_name", account.Name,
+					"model", reqModel,
+					"upstream_status", resp.StatusCode,
+				)
+				return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
+			}
 			if !agentTaskRecoveryTried && s.isAgentIdentityAccount(ctx, account) && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, respBody) {
 				agentTaskRecoveryTried = true
 				expectedTaskID := account.GetCredential("task_id")

@@ -713,8 +713,19 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			continue
 		}
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
-		reqLog.Debug("openai.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
+		// Info 级：让每次选号在日志里留下「路由到哪个账号 + 是亲和命中还是随机」，
+		// 便于调试缓存亲和策略（此前只有 Debug 级，生产 release 模式不可见）。
+		reqLog.Info("openai.account_selected",
+			zap.Int64("account_id", account.ID),
+			zap.String("account_name", account.Name),
+			zap.String("routing_layer", scheduleDecision.Layer),
+			zap.Bool("sticky_previous_hit", scheduleDecision.StickyPreviousHit),
+			zap.Bool("sticky_session_hit", scheduleDecision.StickySessionHit),
+			zap.Int("candidate_count", scheduleDecision.CandidateCount),
+			zap.Int("excluded_account_count", len(failedAccountIDs)),
+		)
 		setOpsSelectedAccount(c, account.ID, account.Platform)
+		setOpsSelectedRoutingInfo(c, scheduleDecision.Layer, scheduleDecision.StickyPreviousHit || scheduleDecision.StickySessionHit)
 
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
 		if slotResult == openAISlotAcquireProfitVetoed {
@@ -1280,9 +1291,18 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		}
 		account := selection.Account
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
-		reqLog.Debug("openai_messages.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
-		_ = scheduleDecision
+		// Info 级：区分亲和命中与随机选择（Claude Code /v1/messages 链路）。
+		reqLog.Info("openai_messages.account_selected",
+			zap.Int64("account_id", account.ID),
+			zap.String("account_name", account.Name),
+			zap.String("routing_layer", scheduleDecision.Layer),
+			zap.Bool("sticky_previous_hit", scheduleDecision.StickyPreviousHit),
+			zap.Bool("sticky_session_hit", scheduleDecision.StickySessionHit),
+			zap.Int("candidate_count", scheduleDecision.CandidateCount),
+			zap.Int("excluded_account_count", len(failedAccountIDs)),
+		)
 		setOpsSelectedAccount(c, account.ID, account.Platform)
+		setOpsSelectedRoutingInfo(c, scheduleDecision.Layer, scheduleDecision.StickyPreviousHit || scheduleDecision.StickySessionHit)
 
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
 		if slotResult == openAISlotAcquireProfitVetoed {

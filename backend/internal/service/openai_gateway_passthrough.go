@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -403,6 +404,23 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 				continue
 			}
 			upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(probeBody)))
+			// 透传模式下同样可能踩到模型级 Responses 能力差异：上游对个别模型
+			// （如 glm-5.3-flash）只支持 /v1/chat/completions。学到后转一次直转桥，
+			// 并记住 (账号, 模型) 避免后续轮次反复 400。
+			if account.Type == AccountTypeAPIKey &&
+				isOpenAIResponsesNotSupportedUpstreamError(resp.StatusCode, upstreamMsg, probeBody) {
+				markOpenAIResponsesModelChatOnly(account.ID, reqModel)
+				logger.LegacyPrintf("service.openai_gateway",
+					"[OpenAI passthrough] Upstream does not support Responses API for model %s (account: %s, status: %d); retrying via chat completions bridge",
+					reqModel, account.Name, resp.StatusCode)
+				slog.Warn("openai_responses_model_chat_only_fallback",
+					"account_id", account.ID,
+					"account_name", account.Name,
+					"model", reqModel,
+					"upstream_status", resp.StatusCode,
+				)
+				return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
+			}
 			if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 				c, account, requestedModel, body, resp.StatusCode, upstreamMsg, probeBody, compactModelFallbackRetried,
 			); retry {

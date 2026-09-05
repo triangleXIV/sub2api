@@ -35,6 +35,15 @@ const (
 	// AccountID 当前请求最终命中的账号 ID（用于统一请求链路日志字段）。
 	AccountID Key = "ctx_account_id"
 
+	// RoutingLayer 当前请求最终选号的调度层（previous_response_id /
+	// guardian_parent / session_hash / load_balance 等，见 OpenAIAccountScheduleDecision）。
+	// 用于在访问日志里区分「亲和命中」与「随机/负载均衡选择」。
+	RoutingLayer Key = "ctx_routing_layer"
+
+	// StickyHit 当前请求最终选号是否命中粘性绑定（session 或 previous_response）。
+	// 与 RoutingLayer 一起回答「这次路由到该账号是因为亲和还是随机」。
+	StickyHit Key = "ctx_sticky_hit"
+
 	// RetryCount 表示当前请求在网关层的重试次数（用于 Ops 记录与排障）。
 	RetryCount Key = "ctx_retry_count"
 

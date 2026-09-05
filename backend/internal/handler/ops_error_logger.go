@@ -29,6 +29,8 @@ const (
 	opsModelKey                  = "ops_model"
 	opsStreamKey                 = "ops_stream"
 	opsAccountIDKey              = "ops_account_id"
+	opsRoutingLayerKey           = "ops_routing_layer"
+	opsStickyHitKey              = "ops_sticky_hit"
 	opsRoutingCapacityLimitedKey = "ops_routing_capacity_limited"
 	opsDedicatedErrorRecordedKey = "ops_dedicated_error_recorded"
 
@@ -478,6 +480,26 @@ func setOpsSelectedAccount(c *gin.Context, accountID int64, platform ...string) 
 				ctx = context.WithValue(ctx, ctxkey.Platform, p)
 			}
 		}
+		c.Request = c.Request.WithContext(ctx)
+	}
+}
+
+// setOpsSelectedRoutingInfo 记录最终选号的调度层与粘性命中标记，供访问日志与
+// 排障区分「亲和命中」与「随机/负载均衡选择」。账号切换后重复调用会覆盖为
+// 最终实际转发账号对应的值。
+func setOpsSelectedRoutingInfo(c *gin.Context, layer string, stickyHit bool) {
+	if c == nil {
+		return
+	}
+	layer = strings.TrimSpace(layer)
+	if layer == "" {
+		layer = service.OpenAIAccountScheduleLayerLoadBalance
+	}
+	c.Set(opsRoutingLayerKey, layer)
+	c.Set(opsStickyHitKey, stickyHit)
+	if c.Request != nil {
+		ctx := context.WithValue(c.Request.Context(), ctxkey.RoutingLayer, layer)
+		ctx = context.WithValue(ctx, ctxkey.StickyHit, stickyHit)
 		c.Request = c.Request.WithContext(ctx)
 	}
 }

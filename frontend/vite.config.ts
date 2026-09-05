@@ -1,6 +1,5 @@
 import { defineConfig, loadEnv, Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
-import checker from 'vite-plugin-checker'
 import { resolve } from 'path'
 
 function escapeHtml(value: string): string {
@@ -86,9 +85,8 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [
       vue(),
-      checker({
-        vueTsc: true
-      }),
+      // vite-plugin-checker 为 ESM-only，Node 24 + vite build 的 CJS 配置打包
+      // 会触发 require(ESM) 报错；类型检查已由构建脚本的 vue-tsc -b 承担，此处不再引入。
       injectPublicSettings(backendUrl)
     ],
   resolve: {

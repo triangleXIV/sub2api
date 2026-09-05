@@ -27,6 +27,10 @@ const (
 	openAIAdvancedSchedulerSettingKey          = "openai_advanced_scheduler_enabled"
 )
 
+// OpenAIAccountScheduleLayerLoadBalance 是负载均衡调度层的导出常量，
+// 供 handler 等跨包调用方在日志/上下文里引用（避免跨包硬编码层名字符串）。
+const OpenAIAccountScheduleLayerLoadBalance = openAIAccountScheduleLayerLoadBalance
+
 const (
 	openAIAdvancedSchedulerSettingCacheTTL  = 5 * time.Second
 	openAIAdvancedSchedulerSettingDBTimeout = 2 * time.Second
@@ -2368,6 +2372,20 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		legacySessionHash := sessionHash
 		if preserveGuardianParentBinding {
 			legacySessionHash = ""
+		}
+		// legacy 负载均衡路径不维护 decision 的层/命中标志；这里读一次粘性绑定，
+		// 最终选中账号与绑定一致即视为粘性命中，让日志能区分「亲和」与「随机」。
+		legacyStickyAccountID := int64(0)
+		if legacySessionHash != "" && s.cache != nil {
+			if id, err := s.getStickySessionAccountID(ctx, groupID, legacySessionHash); err == nil && id > 0 {
+				legacyStickyAccountID = id
+			}
+		}
+		noteLegacyStickyHit := func(accountID int64) {
+			if legacyStickyAccountID > 0 && accountID == legacyStickyAccountID {
+				decision.Layer = openAIAccountScheduleLayerSessionSticky
+				decision.StickySessionHit = true
+			}
 		}
 		if requiredTransport == OpenAIUpstreamTransportAny || requiredTransport == OpenAIUpstreamTransportHTTPSSE {
 			effectiveExcludedIDs := cloneExcludedAccountIDs(excludedIDs)

@@ -58,6 +58,12 @@ const ExtraKeyResponsesMode = "openai_responses_mode"
 // 值类型为 bool：true=支持、false=不支持、键缺失=未探测。
 const ExtraKeyResponsesSupported = "openai_responses_supported"
 
+// ExtraKeyResponsesChatOnlyModels 是 accounts.extra JSON 中存储「必须走
+// /v1/chat/completions 直转」的模型清单键名。值类型为 string 数组或逗号分隔
+// 字符串。用于上游 Responses 支持是模型级（而非账号级）的中转站：账号探测通过后，
+// 个别不支持 Responses 的模型可被管理员钉死到 Chat Completions 直转路径。
+const ExtraKeyResponsesChatOnlyModels = "openai_responses_chat_only_models"
+
 // NormalizeResponsesSupportMode 归一化账号级 Responses API 路由覆盖模式。
 // 缺失或非法值按 auto 处理，以保持存量行为。
 func NormalizeResponsesSupportMode(mode string) ResponsesSupportMode {

@@ -284,6 +284,13 @@ type PricingService struct {
 	// 需要从本地目录缓存重建叠加层。
 	customFilesHash string
 
+	// overrideManaged 记录被运营者 override 文件显式改写并最终并入目录的模型
+	// （小写规范化）。override 是优先级最高的定价数据源（config.yaml：优先级
+	// 最高），计费层针对内置目录旧价兜底的模型修正策略（如 DeepSeek 官方价
+	// 强制、峰谷倍率）对其豁免；计费服务经 IsOperatorOverride 查询该集合。
+	// 与 pricingData 在同一锁临界区内更新。
+	overrideManaged map[string]struct{}
+
 	// 停止信号
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -575,9 +582,12 @@ func (s *PricingService) reloadCustomPricingLayers() error {
 		}
 	}
 
+	managed := s.operatorManagedOverrideModels(data)
+
 	s.mu.Lock()
 	warnDroppedLongContextLadders(s.pricingData, data)
 	s.pricingData = data
+	s.overrideManaged = managed
 	s.customFilesHash = fingerprint
 	s.mu.Unlock()
 
@@ -642,9 +652,12 @@ func (s *PricingService) downloadPricingData() error {
 	}
 
 	// 更新内存数据
+	managed := s.operatorManagedOverrideModels(data)
+
 	s.mu.Lock()
 	warnDroppedLongContextLadders(s.pricingData, data)
 	s.pricingData = data
+	s.overrideManaged = managed
 	s.lastUpdated = time.Now()
 	s.localHash = syncHash
 	s.customFilesHash = customFilesHash
@@ -969,6 +982,40 @@ func (s *PricingService) loadPricingOverrideEntries() map[string]json.RawMessage
 	return entries
 }
 
+// operatorManagedOverrideModels 返回 override 文件条目与最终目录数据的交集
+// （小写规范化）。override 中存在但未被目录收编的条目（拼错模型名、或无价格
+// 字段的纯补丁）不进集合：它们对计费无效，mergeOverrideOnlyModels 已另行告警。
+func (s *PricingService) operatorManagedOverrideModels(data map[string]*LiteLLMModelPricing) map[string]struct{} {
+	overrides := s.loadPricingOverrideEntries()
+	if len(overrides) == 0 {
+		return nil
+	}
+	managed := make(map[string]struct{}, len(overrides))
+	for name := range overrides {
+		if _, ok := data[name]; ok {
+			managed[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
+		}
+	}
+	return managed
+}
+
+// IsOperatorOverride 报告该模型的目录条目是否被运营者 override 文件显式改写。
+// 此类条目按运营者意图计费：内置的 DeepSeek 官方价强制与峰谷倍率对其豁免，
+// 与分组/渠道自定义定价同一口径——运营者显式配置优先于内置修正策略。
+func (s *PricingService) IsOperatorOverride(model string) bool {
+	if s == nil {
+		return false
+	}
+	key := strings.ToLower(strings.TrimSpace(model))
+	if key == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.overrideManaged[key]
+	return ok
+}
+
 // mergePricingOverrideEntry 在 JSON 字段层浅合并：patch 字段覆盖 base 同名字段，
 // 值为 null 的 patch 字段从结果中删除，base 为空时结果即 patch 本身。
 // patch 不是 JSON 对象时返回 ok=false。
@@ -1070,9 +1117,12 @@ func (s *PricingService) loadPricingData(filePath string) error {
 	hash := sha256.Sum256(data)
 	hashStr := hex.EncodeToString(hash[:])
 
+	managed := s.operatorManagedOverrideModels(pricingData)
+
 	s.mu.Lock()
 	warnDroppedLongContextLadders(s.pricingData, pricingData)
 	s.pricingData = pricingData
+	s.overrideManaged = managed
 	s.localHash = hashStr
 	s.customFilesHash = customFilesHash
 

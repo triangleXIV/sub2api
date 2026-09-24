@@ -1401,7 +1401,7 @@ func (s *BillingService) getModelPricingAt(model string, pricingAt time.Time) (*
 				ImageInputPricePerToken:       litellmPricing.InputCostPerImageToken,
 				ImageCacheReadPricePerToken:   litellmPricing.CacheReadInputImageTokenCost,
 				ImageOutputPricePerToken:      litellmPricing.OutputCostPerImageToken,
-			}, true, pricingAt), nil
+			}, !s.operatorOverrideManaged(model), pricingAt), nil
 		}
 	}
 
@@ -1593,13 +1593,15 @@ func (s *BillingService) calculateTokenCost(resolved *ResolvedPricing, input Cos
 
 	// 默认价卡（Source=LiteLLM）应用 DeepSeek 官方价强制覆盖（幂等，GetModelPricing
 	// 内部已强制过）；分组/渠道自定义定价保留运营者配置，不强制覆盖官方价。
-	pricing = s.applyModelSpecificPricingPolicyEx(input.Model, pricing, resolved.Source == PricingSourceLiteLLM, pricingAt)
+	// 运营者 override 文件显式改写的模型同样豁免：override 是最高优先级定价源。
+	forceDeepSeekRates := resolved.Source == PricingSourceLiteLLM && !s.operatorOverrideManaged(input.Model)
+	pricing = s.applyModelSpecificPricingPolicyEx(input.Model, pricing, forceDeepSeekRates, pricingAt)
 
 	// DeepSeek 模型默认价卡按官方峰谷口径调整：高峰时段（01:00–04:00 与
 	// 06:00–10:00 UTC，仅工作日；北京时间周末全天低谷）按 2× 低谷价计费。
-	// 仅作用于默认价卡（Source=LiteLLM，无分组/渠道自定义定价）——分组/渠道
-	// 自定义定价保持运营者语义，不叠加。先克隆再乘，避免污染共享 fallbackPrices 指针。
-	if resolved.Source == PricingSourceLiteLLM && isDeepSeekModel(input.Model) {
+	// 仅作用于未被运营者 override 显式改写的默认价卡——运营者价卡保持原义，
+	// 不叠加峰谷倍率。先克隆再乘，避免污染共享 fallbackPrices 指针。
+	if forceDeepSeekRates && isDeepSeekModel(input.Model) {
 		if mult := deepseekPeakMultiplierAt(pricingAt); mult > 1 {
 			cloned := *pricing
 			cloned.InputPricePerToken *= mult
@@ -1857,6 +1859,14 @@ func (s *BillingService) calculateCostInternalWithPolicy(
 	return s.computeTokenBreakdown(pricing, tokens, rateMultiplier, serviceTier, longContextBillingEnabled), nil
 }
 
+// operatorOverrideManaged 报告该模型定价是否由运营者 override 文件显式管理。
+// DeepSeek 官方价强制与峰谷倍率是针对不可控远端目录旧价的兜底修正；运营者通过
+// override 文件显式改写的价卡优先级最高（config.yaml：优先级最高），与分组/
+// 渠道自定义定价同口径豁免，不得被内置修正策略改写。
+func (s *BillingService) operatorOverrideManaged(model string) bool {
+	return s.pricingService != nil && s.pricingService.IsOperatorOverride(model)
+}
+
 // applyModelSpecificPricingPolicy 对目录数据做模型特定修正：DeepSeek 官方价
 // 强制覆盖；GPT-5.6 缺 cache_write 价时按官方规则补 1.25 倍输入价；Fast/priority
 // 档按业务倍率改写（本地/远程目录的 priority 价可能沿用官方旧口径）。长上下文
@@ -1872,8 +1882,9 @@ func (s *BillingService) applyModelSpecificPricingPolicy(model string, pricing *
 // applyModelSpecificPricingPolicyEx 与 applyModelSpecificPricingPolicy 相同，
 // 但由调用方控制是否强制 DeepSeek 官方价（forceDeepSeekRates），并显式传入
 // 计费时点 pricingAt（零值表示按当前时刻判定）。
-// calculateTokenCost 对分组/渠道自定义定价（Source 非 LiteLLM）传 false：
-// 强制覆盖会把运营者配置的售价盖回官方价，违反自定义定价语义。
+// calculateTokenCost 对分组/渠道自定义定价（Source 非 LiteLLM）与运营者
+// override 文件显式改写的模型传 false：强制覆盖会把运营者配置的售价盖回
+// 官方价，违反自定义定价语义。
 func (s *BillingService) applyModelSpecificPricingPolicyEx(model string, pricing *ModelPricing, forceDeepSeekRates bool, pricingAt time.Time) *ModelPricing {
 	if pricing == nil {
 		return nil
@@ -1881,7 +1892,8 @@ func (s *BillingService) applyModelSpecificPricingPolicyEx(model string, pricing
 	// DeepSeek 模型：无论 JSON/远端价格表给什么价，一律强制官方低谷价
 	// （Flash 三档为 2026-09-10 官方降价后口径）。这是覆盖远端旧价的关键——远端
 	// 仓库不可改，生产会先拉到旧价，必须在此兜底修正；克隆后再覆盖，避免污染
-	// 共享 fallbackPrices 指针。
+	// 共享 fallbackPrices 指针。运营者 override 文件显式改写的模型由调用方传
+	// forceDeepSeekRates=false 豁免（override 优先级最高）。
 	// 档位判定：含 "deepseek-v4-pro" 的版本化名称（如 deepseek-v4-pro-0813）归 pro 档，
 	// 其余 deepseek-*（含已停服的 chat/reasoner 与未知型号）统一归 flash 档。
 	// 2026-09-14 04:00 UTC 起上游把 pro 请求路由到 V4.1-Flash，pro 档改按

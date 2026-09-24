@@ -292,8 +292,10 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		}
 	}
 
-	// 该 (账号, 模型) 已被学习为「上游拒绝 reasoning 字段」时，出站前直接
-	// 剥离 reasoning，避免每轮请求都白挨一次 400 再重试。
+	// 防御性兜底：主路径上「reasoning 被拒」会同时标记模型级 chat 直转 gate，
+	// 请求在本函数更早处已改走 raw chat（reasoning_effort 原生透传）。这里仅
+	// 在极少数只标了 reasoning-rejected、未标 chat-only 的组合下，出站前
+	// 剥离 reasoning 保底，避免整轮 400。
 	if account.Type == AccountTypeAPIKey &&
 		(isOpenAIResponsesReasoningFieldRejected(account.ID, originalModel) ||
 			(!strings.EqualFold(strings.TrimSpace(originalModel), strings.TrimSpace(upstreamModel)) &&
@@ -465,22 +467,31 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 			return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 		}
 		// 上游拒绝 reasoning 字段（如「未知请求字段：reasoning.effort」）：
-		// 记住 (账号, 模型)，经本函数重试一次（学习结果会在出站前剥离 reasoning）。
-		if account.Type == AccountTypeAPIKey && !chatResponsesReasoningRetryTried(ctx) &&
+		// reasoning 强度旋钮是这类 CN 上游 chat 端点的能力，Responses 端点没实现。
+		// 学习 (账号, 模型) 并入「模型级 chat 直转」gate（与「当前模型不支持
+		// Responses API」共用同一套路由学习，对任意账号/模型通用），当轮立即转
+		// chat 直转重试，reasoning_effort 原生透传；若 chat 端点同样拒绝，由
+		// forwardAsRawChatCompletions 内的安全网剥离后重试兜底。
+		if account.Type == AccountTypeAPIKey &&
 			isOpenAIResponsesReasoningFieldRejectionError(resp.StatusCode, upstreamMsg, respBody) &&
 			gjson.GetBytes(responsesBody, "reasoning").Exists() {
 			markOpenAIResponsesReasoningFieldRejected(account.ID, originalModel)
+			markOpenAIResponsesModelChatOnly(account.ID, originalModel)
 			if upstreamModel != "" && !strings.EqualFold(strings.TrimSpace(originalModel), strings.TrimSpace(upstreamModel)) {
 				markOpenAIResponsesReasoningFieldRejected(account.ID, upstreamModel)
+				markOpenAIResponsesModelChatOnly(account.ID, upstreamModel)
 			}
-			logger.L().Warn("openai chat_completions: upstream rejects reasoning field, retrying without reasoning",
+			logger.L().Warn("openai chat_completions: upstream rejects reasoning field via Responses, routing model via chat completions",
 				zap.Int64("account_id", account.ID),
 				zap.String("model", originalModel),
 				zap.String("upstream_model", upstreamModel),
 				zap.Int("upstream_status", resp.StatusCode),
 				zap.String("upstream_message", upstreamMsg),
 			)
-			return s.forwardAsChatCompletions(markChatResponsesReasoningRetryTried(ctx), c, account, body, promptCacheKey, defaultMappedModel, compatPromptCacheTenantIsolated)
+			if isResponsesShape {
+				return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
+			}
+			return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 		}
 		if account.Type == AccountTypeAPIKey &&
 			!account.IsOpenCodeGo() &&

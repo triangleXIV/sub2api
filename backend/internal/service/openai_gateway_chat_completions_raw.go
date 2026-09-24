@@ -235,6 +235,27 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 			}
 			return s.handleChatCompletionsErrorResponse(resp, c, account, billingModel)
 		}
+		// 安全网：连 reasoning_effort 也被严格 chat 上游整体拒绝时（罕见，
+		// 它是标准 OpenAI chat 参数），学习 (账号, 模型) 并剥离该字段后经本
+		// 函数重试一次，保底让请求成功（思考走上游默认档）。
+		if account.Type == AccountTypeAPIKey && !chatReasoningStripRetryTried(ctx) &&
+			isOpenAIResponsesReasoningFieldRejectionError(resp.StatusCode, upstreamMsg, respBody) &&
+			gjson.GetBytes(body, "reasoning_effort").Exists() {
+			if stripped, derr := sjson.DeleteBytes(body, "reasoning_effort"); derr == nil {
+				markOpenAIResponsesReasoningFieldRejected(account.ID, originalModel)
+				if upstreamModel != "" && !strings.EqualFold(strings.TrimSpace(originalModel), strings.TrimSpace(upstreamModel)) {
+					markOpenAIResponsesReasoningFieldRejected(account.ID, upstreamModel)
+				}
+				logger.L().Warn("openai raw chat_completions: upstream rejects reasoning_effort, retrying without it",
+					zap.Int64("account_id", account.ID),
+					zap.String("model", originalModel),
+					zap.String("upstream_model", upstreamModel),
+					zap.Int("upstream_status", resp.StatusCode),
+					zap.String("upstream_message", upstreamMsg),
+				)
+				return s.forwardAsRawChatCompletions(markChatReasoningStripRetryTried(ctx), c, account, stripped, defaultMappedModel)
+			}
+		}
 		if foErr := s.failoverOpenAIUpstreamHTTPError(ctx, c, account, resp, respBody, upstreamMsg, upstreamModel); foErr != nil {
 			return nil, foErr
 		}

@@ -476,6 +476,31 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 			)
 			return s.forwardAnthropicViaRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 		}
+		// 上游 400 拒绝 reasoning 字段（如 CN 中转 /v1/responses 的「未知请求字段：
+		// reasoning.effort」）：reasoning 强度旋钮在这类上游的 chat 端点原生可用，
+		// Responses 端点未实现。学习 (账号, 模型) 并入模型级 chat 直转 gate（与
+		// 「当前模型不支持 Responses API」共用同一套路由学习，chat 入口链路同款
+		// 语义），当轮立即经 Chat Completions 直转重试——bridge 会把
+		// output_config.effort 原样映射为 reasoning_effort（deepseek/glm/kimi 等
+		// max 档位模型保留 max），Claude Code 的思维链强度控制不丢失。
+		if account.Type == AccountTypeAPIKey &&
+			isOpenAIResponsesReasoningFieldRejectionError(resp.StatusCode, upstreamMsg, respBody) &&
+			gjson.GetBytes(responsesBody, "reasoning").Exists() {
+			markOpenAIResponsesReasoningFieldRejected(account.ID, originalModel)
+			markOpenAIResponsesModelChatOnly(account.ID, originalModel)
+			if upstreamModel != "" && !strings.EqualFold(strings.TrimSpace(originalModel), strings.TrimSpace(upstreamModel)) {
+				markOpenAIResponsesReasoningFieldRejected(account.ID, upstreamModel)
+				markOpenAIResponsesModelChatOnly(account.ID, upstreamModel)
+			}
+			logger.L().Warn("openai messages: upstream rejects reasoning field via Responses, routing model via chat completions",
+				zap.Int64("account_id", account.ID),
+				zap.String("model", originalModel),
+				zap.String("upstream_model", upstreamModel),
+				zap.Int("upstream_status", resp.StatusCode),
+				zap.String("upstream_message", upstreamMsg),
+			)
+			return s.forwardAnthropicViaRawChatCompletions(ctx, c, account, body, defaultMappedModel)
+		}
 		if !agentIdentityTaskRecoveryWasTried(ctx) && s.isAgentIdentityAccount(ctx, account) && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, respBody) {
 			expectedTaskID := account.GetCredential("task_id")
 			if err := s.recoverAgentIdentityTask(ctx, account, expectedTaskID); err != nil {

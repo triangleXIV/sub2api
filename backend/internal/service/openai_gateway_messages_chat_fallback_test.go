@@ -488,3 +488,64 @@ func TestForwardAsAnthropic_ResponsesSupportedAccountStillUsesResponsesEndpoint(
 	require.Empty(t, upstream.lastReq.Header.Get("OpenAI-Beta"))
 	require.Equal(t, "ok", gjson.Get(rec.Body.String(), "content.0.text").String())
 }
+
+// Claude Code 走 /v1/messages 时携带 output_config.effort，Anthropic→Responses
+// 转换后出站体恒带 reasoning 字段；严格 CN 上游的 /v1/responses 会以
+// 「未知请求字段：reasoning.effort」整体 400。此时必须当轮经 Chat Completions
+// 直转重试（reasoning_effort 原生透传，deepseek-flash 的 max 档保留 max），
+// 并学习 (账号, 模型) 让后续轮次直接走 chat 桥，不再白挨 400。
+func TestForwardAsAnthropic_ReasoningFieldRejectionRetriesViaChatBridge(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	body := []byte(`{"model":"deepseek-flash","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"output_config":{"effort":"max"},"stream":false}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	upstream := &httpUpstreamRecorder{responses: []*http.Response{
+		{
+			StatusCode: http.StatusBadRequest,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"未知请求字段：reasoning.effort","type":"invalid_request_error"}}`)),
+		},
+		{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}, "x-request-id": []string{"rid_msg_reasoning_retry"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"chatcmpl_rr","object":"chat.completion","model":"deepseek-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok","reasoning_content":"thought"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+			)),
+		},
+	}}
+	svc := &OpenAIGatewayService{
+		cfg:          rawChatCompletionsTestConfig(),
+		httpUpstream: upstream,
+	}
+	account := rawChatCompletionsTestAccount()
+	account.ID = 990017
+	account.Extra = map[string]any{
+		openai_compat.ExtraKeyResponsesMode:      string(openai_compat.ResponsesSupportModeAuto),
+		openai_compat.ExtraKeyResponsesSupported: true,
+	}
+
+	result, err := svc.ForwardAsAnthropic(context.Background(), c, account, body, "", "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	require.Len(t, upstream.requests, 2, "首次 /v1/responses 被 reasoning 拒绝后必须当轮经 chat 直转重试")
+	require.True(t, strings.HasSuffix(upstream.requests[0].URL.Path, "/responses"))
+	require.True(t, strings.HasSuffix(upstream.requests[1].URL.Path, "/chat/completions"))
+	require.True(t, gjson.GetBytes(upstream.bodies[0], "reasoning").Exists(), "首次出站为 Responses 体且携带 reasoning")
+	require.Equal(t, "max", gjson.GetBytes(upstream.bodies[1], "reasoning_effort").String(),
+		"chat 桥重试必须保留思维链强度（deepseek-flash 支持 max 档）")
+
+	require.True(t, isOpenAIResponsesReasoningFieldRejected(account.ID, "deepseek-flash"), "必须学习 reasoning 拒绝")
+	require.True(t, isOpenAIResponsesModelChatOnly(account.ID, "deepseek-flash"), "必须并入模型级 chat 直转 gate")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "thinking", gjson.Get(rec.Body.String(), "content.0.type").String(),
+		"reasoning_content 必须转成 thinking 块")
+	require.Equal(t, "ok", gjson.Get(rec.Body.String(), "content.1.text").String())
+	require.NotNil(t, result.ReasoningEffort)
+	require.Equal(t, "max", *result.ReasoningEffort)
+}

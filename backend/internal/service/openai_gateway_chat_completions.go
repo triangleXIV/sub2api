@@ -206,6 +206,19 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	billingModel := resolveOpenAIForwardModel(account, originalModel, defaultMappedModel)
 	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
 
+	// 模型级 Responses gate：管理员钉死或已学习为「上游不支持该模型 Responses」
+	// 的 (账号, 模型) 直接走 Chat Completions 直转，不再白挨一次上游 400。
+	// 原始模型名与映射后的上游模型名都检查，任一命中即可
+	// （与 /v1/responses 链路 openai_responses_model_gate 的学习口径一致）。
+	if shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, originalModel) ||
+		(!strings.EqualFold(strings.TrimSpace(originalModel), strings.TrimSpace(upstreamModel)) &&
+			shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, upstreamModel)) {
+		if isResponsesShape {
+			return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
+		}
+		return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
+	}
+
 	promptCacheKey = strings.TrimSpace(promptCacheKey)
 	compatPromptCacheInjected := false
 	if promptCacheKey == "" && !isResponsesShape && (account.UsesOpenAICodexProtocol() || account.IsOpenAIApiKey()) && shouldAutoInjectPromptCacheKeyForCompat(upstreamModel) {
@@ -276,6 +289,20 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		responsesBody, err = json.Marshal(responsesReq)
 		if err != nil {
 			return nil, fmt.Errorf("marshal responses request: %w", err)
+		}
+	}
+
+	// 该 (账号, 模型) 已被学习为「上游拒绝 reasoning 字段」时，出站前直接
+	// 剥离 reasoning，避免每轮请求都白挨一次 400 再重试。
+	if account.Type == AccountTypeAPIKey &&
+		(isOpenAIResponsesReasoningFieldRejected(account.ID, originalModel) ||
+			(!strings.EqualFold(strings.TrimSpace(originalModel), strings.TrimSpace(upstreamModel)) &&
+				isOpenAIResponsesReasoningFieldRejected(account.ID, upstreamModel))) {
+		responsesReq.Reasoning = nil
+		if gjson.GetBytes(responsesBody, "reasoning").Exists() {
+			if stripped, derr := sjson.DeleteBytes(responsesBody, "reasoning"); derr == nil {
+				responsesBody = stripped
+			}
 		}
 	}
 
@@ -415,6 +442,45 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 				return nil, fmt.Errorf("agent identity task recovery failed: %w", err)
 			}
 			return s.forwardAsChatCompletions(markAgentIdentityTaskRecoveryTried(ctx), c, account, body, promptCacheKey, defaultMappedModel, compatPromptCacheTenantIsolated)
+		}
+		// 上游「当前模型不支持 Responses API」：模型级能力缺失，不是账号故障。
+		// 记住 (账号, 模型) 并立即转 Chat Completions 直转重试一次，TTL 内的
+		// 后续轮次直接走直转（复用 /v1/responses 链路的 model gate）。
+		if account.Type == AccountTypeAPIKey &&
+			isOpenAIResponsesNotSupportedUpstreamError(resp.StatusCode, upstreamMsg, respBody) {
+			markOpenAIResponsesModelChatOnly(account.ID, originalModel)
+			if upstreamModel != "" && !strings.EqualFold(strings.TrimSpace(originalModel), strings.TrimSpace(upstreamModel)) {
+				markOpenAIResponsesModelChatOnly(account.ID, upstreamModel)
+			}
+			logger.L().Warn("openai chat_completions: upstream rejects model via Responses API, retrying via chat completions bridge",
+				zap.Int64("account_id", account.ID),
+				zap.String("model", originalModel),
+				zap.String("upstream_model", upstreamModel),
+				zap.Int("upstream_status", resp.StatusCode),
+				zap.String("upstream_message", upstreamMsg),
+			)
+			if isResponsesShape {
+				return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
+			}
+			return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
+		}
+		// 上游拒绝 reasoning 字段（如「未知请求字段：reasoning.effort」）：
+		// 记住 (账号, 模型)，经本函数重试一次（学习结果会在出站前剥离 reasoning）。
+		if account.Type == AccountTypeAPIKey && !chatResponsesReasoningRetryTried(ctx) &&
+			isOpenAIResponsesReasoningFieldRejectionError(resp.StatusCode, upstreamMsg, respBody) &&
+			gjson.GetBytes(responsesBody, "reasoning").Exists() {
+			markOpenAIResponsesReasoningFieldRejected(account.ID, originalModel)
+			if upstreamModel != "" && !strings.EqualFold(strings.TrimSpace(originalModel), strings.TrimSpace(upstreamModel)) {
+				markOpenAIResponsesReasoningFieldRejected(account.ID, upstreamModel)
+			}
+			logger.L().Warn("openai chat_completions: upstream rejects reasoning field, retrying without reasoning",
+				zap.Int64("account_id", account.ID),
+				zap.String("model", originalModel),
+				zap.String("upstream_model", upstreamModel),
+				zap.Int("upstream_status", resp.StatusCode),
+				zap.String("upstream_message", upstreamMsg),
+			)
+			return s.forwardAsChatCompletions(markChatResponsesReasoningRetryTried(ctx), c, account, body, promptCacheKey, defaultMappedModel, compatPromptCacheTenantIsolated)
 		}
 		if account.Type == AccountTypeAPIKey &&
 			!account.IsOpenCodeGo() &&

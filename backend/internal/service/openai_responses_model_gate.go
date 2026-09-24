@@ -1,12 +1,14 @@
 package service
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
+	"github.com/tidwall/gjson"
 )
 
 // openAIResponsesModelChatOnlyTTL 是「模型不支持 Responses API」学习结果的进程内
@@ -143,4 +145,98 @@ func isOpenAIResponsesNotSupportedUpstreamError(statusCode int, upstreamMsg stri
 		strings.Contains(haystack, "not support") ||
 		strings.Contains(haystack, "does not support") ||
 		strings.Contains(haystack, "doesn't support")
+}
+
+// ---------------------------------------------------------------------------
+// reasoning 字段拒绝学习（/v1/chat/completions → Responses 中转链）
+//
+// 部分 CN 上游的 /v1/responses 按模型接受 reasoning 字段：qwen3.8-max 接受，
+// deepseek-flash 会以「未知请求字段：reasoning.effort」整体拒绝。这里按
+// (account, model) 学习拒绝结果，TTL 内后续请求出站前直接剥离 reasoning，
+// 不再每轮白挨一次 400。
+// ---------------------------------------------------------------------------
+
+const openAIResponsesReasoningRejectedTTL = 10 * time.Minute
+
+type openAIResponsesReasoningRejectedEntry struct {
+	expiresAt time.Time
+}
+
+var (
+	openAIResponsesReasoningRejectedMu     sync.RWMutex
+	openAIResponsesReasoningRejectedModels = make(map[int64]map[string]openAIResponsesReasoningRejectedEntry)
+)
+
+func isOpenAIResponsesReasoningFieldRejected(accountID int64, model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if accountID <= 0 || model == "" {
+		return false
+	}
+	openAIResponsesReasoningRejectedMu.RLock()
+	defer openAIResponsesReasoningRejectedMu.RUnlock()
+	byModel, ok := openAIResponsesReasoningRejectedModels[accountID]
+	if !ok {
+		return false
+	}
+	entry, ok := byModel[model]
+	if !ok {
+		return false
+	}
+	return time.Now().Before(entry.expiresAt)
+}
+
+func markOpenAIResponsesReasoningFieldRejected(accountID int64, model string) {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if accountID <= 0 || model == "" {
+		return
+	}
+	openAIResponsesReasoningRejectedMu.Lock()
+	defer openAIResponsesReasoningRejectedMu.Unlock()
+	byModel, ok := openAIResponsesReasoningRejectedModels[accountID]
+	if !ok {
+		byModel = make(map[string]openAIResponsesReasoningRejectedEntry)
+		openAIResponsesReasoningRejectedModels[accountID] = byModel
+	}
+	byModel[model] = openAIResponsesReasoningRejectedEntry{expiresAt: time.Now().Add(openAIResponsesReasoningRejectedTTL)}
+}
+
+// isOpenAIResponsesReasoningFieldRejectionError 识别上游对 reasoning 字段的
+// 确定性 400 拒绝。已知文案：
+//   - 中文中转站："未知请求字段：reasoning.effort" / "未知字段：reasoning"
+//   - OpenAI 风格："Unsupported parameter: 'reasoning'." / "Unknown parameter: 'reasoning.effort'"
+//   - error.param 形如 "reasoning" / "reasoning.effort"
+func isOpenAIResponsesReasoningFieldRejectionError(statusCode int, upstreamMsg string, body []byte) bool {
+	if statusCode != http.StatusBadRequest {
+		return false
+	}
+	param := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.param").String()))
+	if strings.HasPrefix(param, "reasoning") {
+		return true
+	}
+	haystack := strings.ToLower(strings.TrimSpace(upstreamMsg))
+	if haystack == "" && len(body) > 0 {
+		haystack = strings.ToLower(string(body))
+	}
+	if haystack == "" || !strings.Contains(haystack, "reasoning") {
+		return false
+	}
+	return strings.Contains(haystack, "未知请求字段") ||
+		strings.Contains(haystack, "未知字段") ||
+		strings.Contains(haystack, "不支持的字段") ||
+		strings.Contains(haystack, "unknown parameter") ||
+		strings.Contains(haystack, "unsupported parameter") ||
+		strings.Contains(haystack, "unknown field") ||
+		strings.Contains(haystack, "unsupported field") ||
+		strings.Contains(haystack, "unrecognized")
+}
+
+type chatResponsesReasoningRetryContextKey struct{}
+
+func markChatResponsesReasoningRetryTried(ctx context.Context) context.Context {
+	return context.WithValue(ctx, chatResponsesReasoningRetryContextKey{}, true)
+}
+
+func chatResponsesReasoningRetryTried(ctx context.Context) bool {
+	tried, _ := ctx.Value(chatResponsesReasoningRetryContextKey{}).(bool)
+	return tried
 }

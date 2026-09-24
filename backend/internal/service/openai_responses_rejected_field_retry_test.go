@@ -749,3 +749,36 @@ func TestNormalizeOpenAIResponsesRejectedFieldRetryBodyClearsUntypedStatusAtInde
 	require.Equal(t, "keep_a", gjson.GetBytes(retryBody, "input.0.status").String())
 	require.False(t, gjson.GetBytes(retryBody, "input.1.status").Exists())
 }
+
+func TestNormalizeOpenAIResponsesRejectedFieldRetryBodyStripsCNRejectedReasoning(t *testing.T) {
+	body := []byte(`{"model":"deepseek-flash","input":[{"type":"message","role":"user","content":"hi"}],"reasoning":{"effort":"high"}}`)
+	responseBody := []byte(`{"error":{"message":"未知请求字段：reasoning.effort","type":"invalid_request_error"}}`)
+
+	retryBody, reason, changed, err := normalizeOpenAIResponsesRejectedFieldRetryBody(http.StatusBadRequest, body, responseBody)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Equal(t, "reasoning parameter rejection", reason)
+	require.False(t, gjson.GetBytes(retryBody, "reasoning").Exists())
+	require.Equal(t, "deepseek-flash", gjson.GetBytes(retryBody, "model").String())
+	require.True(t, gjson.GetBytes(retryBody, "input.0.type").Exists(), "input 内容不应被误删")
+}
+
+func TestNormalizeOpenAIResponsesRejectedFieldRetryBodyStripsENRejectedReasoning(t *testing.T) {
+	body := []byte(`{"model":"m","input":"hi","reasoning":{"effort":"low"}}`)
+	responseBody := []byte(`{"error":{"code":"unsupported_parameter","message":"Unsupported parameter: 'reasoning'.","param":"reasoning"}}`)
+
+	retryBody, reason, changed, err := normalizeOpenAIResponsesRejectedFieldRetryBody(http.StatusBadRequest, body, responseBody)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Equal(t, "reasoning parameter rejection", reason)
+	require.False(t, gjson.GetBytes(retryBody, "reasoning").Exists())
+}
+
+func TestNormalizeOpenAIResponsesRejectedFieldRetryBodyIgnoresUnrelatedCNRejection(t *testing.T) {
+	body := []byte(`{"model":"m","input":"hi","temperature":0.7}`)
+	responseBody := []byte(`{"error":{"message":"未知请求字段：temperature","type":"invalid_request_error"}}`)
+
+	_, _, changed, err := normalizeOpenAIResponsesRejectedFieldRetryBody(http.StatusBadRequest, body, responseBody)
+	require.NoError(t, err)
+	require.False(t, changed, "temperature 不在可自动剔除白名单，不应触发重试")
+}

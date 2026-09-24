@@ -27,6 +27,7 @@ var (
 	openAIResponsesCacheModelRejectionPattern     = regexp.MustCompile(`(?i)["']?(prompt_cache_breakpoint|input\[\d+\]\.prompt_cache_breakpoint)["']?\s+is\s+not\s+supported\s+on\s+this\s+model\b`)
 	openAIResponsesToolParametersParamPattern     = regexp.MustCompile(`(?i)^(?:tools|input)\[\d+\](?:\.tools\[\d+\])*(?:\.function)?\.parameters$`)
 	openAIResponsesMissingSchemaTypePattern       = regexp.MustCompile(`(?i)\bgot\s+["']?type\s*:\s*["']?none["']?`)
+	openAIResponsesCNRejectedMessageParamPattern  = regexp.MustCompile(`未知(?:请求)?字段[：:]\s*["']?([a-zA-Z0-9_.\[\]-]+)`)
 )
 
 type openAIResponsesRejectedFieldRetryState struct {
@@ -157,6 +158,18 @@ func normalizeOpenAIResponsesRejectedFieldRetryBody(statusCode int, body, respon
 		if param == "" {
 			param = messageParam
 		}
+		// 上游拒绝 reasoning 字段（"未知请求字段：reasoning.effort" /
+		// "Unsupported parameter: 'reasoning'"）：整对象剔除后重试，
+		// 让请求继续走上游默认思考档。
+		if param == "reasoning" || strings.HasPrefix(param, "reasoning.") {
+			if gjson.GetBytes(body, "reasoning").Exists() {
+				retryBody, err := sjson.DeleteBytes(body, "reasoning")
+				if err != nil {
+					return nil, "", false, fmt.Errorf("delete rejected reasoning: %w", err)
+				}
+				return retryBody, "reasoning parameter rejection", true, nil
+			}
+		}
 		if index, ok := openAIResponsesRejectedNamespaceIndex(param); ok {
 			return removeOpenAIResponsesRejectedNamespaceAtIndex(body, index)
 		}
@@ -202,15 +215,23 @@ func isExplicitOpenAIResponsesFieldRejection(code, message string) bool {
 		return true
 	}
 	return strings.Contains(message, "unknown parameter") ||
-		strings.Contains(message, "unsupported parameter")
+		strings.Contains(message, "unsupported parameter") ||
+		// CN 中转站文案："未知请求字段：reasoning.effort" / "未知字段" / "不支持的字段"
+		strings.Contains(message, "未知请求字段") ||
+		strings.Contains(message, "未知字段") ||
+		strings.Contains(message, "不支持的字段")
 }
 
 func openAIResponsesRejectedParamFromMessage(message string) string {
 	match := openAIResponsesRejectedMessageParamPattern.FindStringSubmatch(strings.TrimSpace(message))
-	if len(match) != 2 {
-		return ""
+	if len(match) == 2 {
+		return strings.ToLower(strings.TrimSpace(match[1]))
 	}
-	return strings.ToLower(strings.TrimSpace(match[1]))
+	cn := openAIResponsesCNRejectedMessageParamPattern.FindStringSubmatch(strings.TrimSpace(message))
+	if len(cn) == 2 {
+		return strings.ToLower(strings.TrimSpace(cn[1]))
+	}
+	return ""
 }
 
 func openAIResponsesMaxZeroContentParamFromMessage(message string) string {

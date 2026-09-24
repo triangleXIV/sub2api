@@ -234,5 +234,15 @@ func TestPricingOverride_TokenrhythmBasePricesApply(t *testing.T) {
 	// 图片模型按张计费：per-image 价由 PricingService 直接供图计费路径读取。
 	imgLitellm := svc.GetModelPricing("qwen-image-2.0")
 	require.NotNil(t, imgLitellm)
-	require.InDelta(t, 1.0, imgLitellm.OutputCostPerImage, 1e-12)
+	require.InDelta(t, 0.2, imgLitellm.OutputCostPerImage, 1e-12)
+
+	// deepseek-flash 被运营者 override 显式改写：豁免 DeepSeek 官方价强制，
+	// 直接返回 override 平价（tokenrhythm 站点口径 ¥1/¥4/¥0.02 每百万）。
+	dsFlash, err := billing.GetModelPricing("deepseek-flash")
+	require.NoError(t, err)
+	require.InDelta(t, 1e-6, dsFlash.InputPricePerToken, 1e-12)
+	require.InDelta(t, 4e-6, dsFlash.OutputPricePerToken, 1e-12)
+	require.InDelta(t, 2e-8, dsFlash.CacheReadPricePerToken, 1e-12)
+	require.True(t, svc.IsOperatorOverride("deepseek-flash"))
+	require.False(t, svc.IsOperatorOverride("gpt-5.4"))
 }

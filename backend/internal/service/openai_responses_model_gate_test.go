@@ -62,3 +62,38 @@ func TestOpenAIResponsesNotSupportedUpstreamError(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenAIResponsesReasoningFieldRejectionDetector(t *testing.T) {
+	cases := []struct {
+		name       string
+		statusCode int
+		message    string
+		body       []byte
+		want       bool
+	}{
+		{"cn unknown field", http.StatusBadRequest, "未知请求字段：reasoning.effort", nil, true},
+		{"cn unknown field via body", http.StatusBadRequest, "", []byte(`{"error":{"message":"未知请求字段：reasoning.effort"}}`), true},
+		{"en unsupported parameter", http.StatusBadRequest, "Unsupported parameter: 'reasoning'.", nil, true},
+		{"en unknown field", http.StatusBadRequest, "Unknown field: reasoning", nil, true},
+		{"param only", http.StatusBadRequest, "", []byte(`{"error":{"message":"bad","param":"reasoning.effort"}}`), true},
+		{"not 400", http.StatusInternalServerError, "未知请求字段：reasoning.effort", nil, false},
+		{"no reasoning keyword", http.StatusBadRequest, "未知请求字段：temperature", nil, false},
+		{"responses not supported message", http.StatusBadRequest, "当前模型不支持 Responses API：glm-5.3", nil, false},
+		{"empty", http.StatusBadRequest, "", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, isOpenAIResponsesReasoningFieldRejectionError(tc.statusCode, tc.message, tc.body))
+		})
+	}
+}
+
+func TestOpenAIResponsesReasoningRejectedLearnedGate(t *testing.T) {
+	account := &Account{ID: 88, Type: AccountTypeAPIKey}
+	require.False(t, isOpenAIResponsesReasoningFieldRejected(account.ID, "deepseek-flash"))
+
+	markOpenAIResponsesReasoningFieldRejected(account.ID, "deepseek-flash")
+	require.True(t, isOpenAIResponsesReasoningFieldRejected(account.ID, "deepseek-flash"))
+	require.True(t, isOpenAIResponsesReasoningFieldRejected(account.ID, "DeepSeek-Flash"), "模型名匹配应大小写不敏感")
+	require.False(t, isOpenAIResponsesReasoningFieldRejected(account.ID, "qwen3.8-max"), "其他模型不受影响")
+}

@@ -232,6 +232,68 @@ func TestCalculateCostUnified_DeepseekPricingAtZeroFallsBackToNow(t *testing.T) 
 }
 
 // ---------------------------------------------------------------------------
+// 运营者 override 显式改写的 DeepSeek 模型：豁免官方价强制与峰谷倍率
+// ---------------------------------------------------------------------------
+
+func TestDeepseekOperatorOverrideExemptsOfficialForceAndPeak(t *testing.T) {
+	dir := t.TempDir()
+	catalogPath := filepath.Join(dir, "catalog.json")
+	require.NoError(t, os.WriteFile(catalogPath, []byte(`{
+		"deepseek-flash": {"litellm_provider": "deepseek", "mode": "chat",
+			"input_cost_per_token": 3e-07, "output_cost_per_token": 1.2e-06,
+			"cache_read_input_token_cost": 6e-09}
+	}`), 0644))
+	// 运营者 override：tokenrhythm 站点口径（¥1/¥4/¥0.02 每百万 → 平价）。
+	overridePath := filepath.Join(dir, "overrides.json")
+	require.NoError(t, os.WriteFile(overridePath, []byte(`{
+		"deepseek-flash": {"input_cost_per_token": 1e-06, "output_cost_per_token": 4e-06,
+			"cache_creation_input_token_cost": 1e-06, "cache_read_input_token_cost": 2e-08}
+	}`), 0644))
+
+	svc := &PricingService{cfg: &config.Config{}}
+	svc.cfg.Pricing.OverrideFile = overridePath
+	require.NoError(t, svc.loadPricingData(catalogPath))
+
+	require.True(t, svc.IsOperatorOverride("deepseek-flash"))
+	require.True(t, svc.IsOperatorOverride("DEEPSEEK-FLASH"), "模型名大小写不敏感")
+	require.False(t, svc.IsOperatorOverride("deepseek-v4-flash"), "未被 override 改写的模型不豁免")
+
+	bs := NewBillingService(&config.Config{}, svc)
+	resolver := NewModelPricingResolver(nil, bs)
+
+	// override 价不得被 DeepSeek 官方价强制覆盖。
+	pricing, err := bs.GetModelPricing("deepseek-flash")
+	require.NoError(t, err)
+	require.InDelta(t, 1e-6, pricing.InputPricePerToken, 1e-15, "override 价必须原样生效")
+	require.InDelta(t, 4e-6, pricing.OutputPricePerToken, 1e-15)
+	require.InDelta(t, 2e-8, pricing.CacheReadPricePerToken, 1e-15)
+	require.InDelta(t, 1e-6, pricing.CacheCreationPricePerToken, 1e-15)
+
+	// 峰谷倍率不得叠加：高峰/低谷时刻成本一致（平价口径）。
+	tokens := UsageTokens{InputTokens: 1000, OutputTokens: 500, CacheReadTokens: 1000}
+	overrideTotal := 1000*1e-6 + 500*4e-6 + 1000*2e-8
+	for _, pricingAt := range []time.Time{
+		time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC), // 周一低谷
+		time.Date(2026, 8, 24, 2, 0, 0, 0, time.UTC),  // 周一高峰
+	} {
+		cost, err := bs.CalculateCostUnified(CostInput{
+			Ctx: context.Background(), Model: "deepseek-flash", Tokens: tokens,
+			RateMultiplier: 1.0, Resolver: resolver, PricingAt: pricingAt,
+		})
+		require.NoError(t, err)
+		require.InDelta(t, overrideTotal, cost.TotalCost, 1e-10,
+			"运营者 override 定价不叠加官方峰谷倍率（pricingAt=%v）", pricingAt)
+	}
+
+	// 未被 override 改写的 DeepSeek 模型仍走官方价强制（远端旧价兜底语义不变）。
+	forced, err := bs.getModelPricingAt("deepseek-v4-flash", time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	require.InDelta(t, 1.5e-7, forced.InputPricePerToken, 1e-15)
+	require.InDelta(t, 6e-7, forced.OutputPricePerToken, 1e-15)
+	require.InDelta(t, 3e-9, forced.CacheReadPricePerToken, 1e-15)
+}
+
+// ---------------------------------------------------------------------------
 // 官方价强制覆盖（远端旧价兜底）与未知 deepseek-* flash 兜底
 // ---------------------------------------------------------------------------
 

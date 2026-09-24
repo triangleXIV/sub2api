@@ -230,13 +230,13 @@ func isOpenAIResponsesReasoningFieldRejectionError(statusCode int, upstreamMsg s
 		strings.Contains(haystack, "unrecognized")
 }
 
-type chatResponsesReasoningRetryContextKey struct{}
+type chatReasoningStripRetryContextKey struct{}
 
-func markChatResponsesReasoningRetryTried(ctx context.Context) context.Context {
-	return context.WithValue(ctx, chatResponsesReasoningRetryContextKey{}, true)
+func markChatReasoningStripRetryTried(ctx context.Context) context.Context {
+	return context.WithValue(ctx, chatReasoningStripRetryContextKey{}, true)
 }
 
-func chatResponsesReasoningRetryTried(ctx context.Context) bool {
-	tried, _ := ctx.Value(chatResponsesReasoningRetryContextKey{}).(bool)
+func chatReasoningStripRetryTried(ctx context.Context) bool {
+	tried, _ := ctx.Value(chatReasoningStripRetryContextKey{}).(bool)
 	return tried
 }

@@ -199,3 +199,40 @@ func TestPricingOverride_DisablesGPT55LadderOnDefaultCatalog(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 272000, pricing.LongContextInputThreshold, "其他模型的目录阶梯不受影响")
 }
+
+// tokenrhythm 基础价对齐文件（resources/model-pricing/tokenrhythm-overrides.json）：
+// 加载到默认目录后，glm-5.3-flash 等目录外模型必须成为独立条目，
+// glm-5.2 等目录内模型的基础价必须被覆盖为站点口径。
+func TestPricingOverride_TokenrhythmBasePricesApply(t *testing.T) {
+	catalogBody, err := os.ReadFile(filepath.Join("..", "..", "resources", "model-pricing", "model_prices_and_context_window.json"))
+	require.NoError(t, err)
+
+	catalogPath := filepath.Join(t.TempDir(), "catalog.json")
+	require.NoError(t, os.WriteFile(catalogPath, catalogBody, 0644))
+
+	overridePath := filepath.Join("..", "..", "resources", "model-pricing", "tokenrhythm-overrides.json")
+	svc := &PricingService{cfg: &config.Config{}}
+	svc.cfg.Pricing.OverrideFile = overridePath
+	require.NoError(t, svc.loadPricingData(catalogPath))
+
+	billing := NewBillingService(&config.Config{}, svc)
+
+	flash, err := billing.GetModelPricing("glm-5.3-flash")
+	require.NoError(t, err)
+	require.InDelta(t, 8e-7, flash.InputPricePerToken, 1e-12)
+	require.InDelta(t, 2.8e-6, flash.OutputPricePerToken, 1e-12)
+	require.InDelta(t, 2.3e-7, flash.CacheReadPricePerToken, 1e-12)
+
+	glm53, err := billing.GetModelPricing("glm-5.3")
+	require.NoError(t, err)
+	require.InDelta(t, 8e-6, glm53.InputPricePerToken, 1e-12)
+
+	glm52, err := billing.GetModelPricing("glm-5.2")
+	require.NoError(t, err)
+	require.InDelta(t, 8e-6, glm52.InputPricePerToken, 1e-12, "glm-5.2 基础价必须对齐站点 8 CNY/1M")
+
+	// 图片模型按张计费：per-image 价由 PricingService 直接供图计费路径读取。
+	imgLitellm := svc.GetModelPricing("qwen-image-2.0")
+	require.NotNil(t, imgLitellm)
+	require.InDelta(t, 1.0, imgLitellm.OutputCostPerImage, 1e-12)
+}

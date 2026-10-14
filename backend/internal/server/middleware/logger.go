@@ -37,6 +37,8 @@ func Logger() gin.HandlerFunc {
 		accountID, hasAccountID := c.Request.Context().Value(ctxkey.AccountID).(int64)
 		platform, _ := c.Request.Context().Value(ctxkey.Platform).(string)
 		model, _ := c.Request.Context().Value(ctxkey.Model).(string)
+		routingLayer, _ := c.Request.Context().Value(ctxkey.RoutingLayer).(string)
+		stickyHit, _ := c.Request.Context().Value(ctxkey.StickyHit).(bool)
 		reason, rejected := GetIngressRejectReason(c)
 		if rejected {
 			recordIngressReject(c, reason)
@@ -76,6 +78,12 @@ func Logger() gin.HandlerFunc {
 		}
 		if model != "" {
 			fields = append(fields, zap.String("model", model))
+		}
+		if routingLayer != "" {
+			fields = append(fields,
+				zap.String("routing_layer", routingLayer),
+				zap.Bool("sticky_hit", stickyHit),
+			)
 		}
 
 		l := logger.FromContext(c.Request.Context()).With(fields...)

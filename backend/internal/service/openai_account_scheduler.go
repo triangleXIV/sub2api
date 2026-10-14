@@ -27,6 +27,10 @@ const (
 	openAIAdvancedSchedulerSettingKey          = "openai_advanced_scheduler_enabled"
 )
 
+// OpenAIAccountScheduleLayerLoadBalance 是负载均衡调度层的导出常量，
+// 供 handler 等跨包调用方在日志/上下文里引用（避免跨包硬编码层名字符串）。
+const OpenAIAccountScheduleLayerLoadBalance = openAIAccountScheduleLayerLoadBalance
+
 const (
 	openAIAdvancedSchedulerSettingCacheTTL  = 5 * time.Second
 	openAIAdvancedSchedulerSettingDBTimeout = 2 * time.Second

@@ -1695,12 +1695,32 @@ func normalizeGLMOpenAIReasoningEffort(raw string) string {
 	}
 }
 
-// glmResponsesUnsupportedServerToolTypes 列出 GLM 上游 responses 实现不认识的
-// OpenAI 服务端工具类型。codex 客户端目录默认给所有路由模型附带原生
+// domesticResponsesCompatModelPrefixes 列出其上游不认 OpenAI 服务端工具类型 /
+// codex 多轮历史条目的国产模型家族前缀(GLM、DeepSeek)。
+var domesticResponsesCompatModelPrefixes = []string{"glm-", "deepseek-"}
+
+// isDomesticResponsesCompatModel 判定映射后的模型是否属于国产兼容家族。模型名
+// 可以带 cn:/global: 之类的路由前缀（如 "cn:deepseek-v4-flash"），取冒号后的
+// 家族段再匹配。大小写不敏感，两端空白已去除。
+func isDomesticResponsesCompatModel(model string) bool {
+	value := strings.ToLower(strings.TrimSpace(model))
+	if idx := strings.Index(value, ":"); idx >= 0 {
+		value = strings.TrimSpace(value[idx+1:])
+	}
+	for _, prefix := range domesticResponsesCompatModelPrefixes {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// domesticResponsesUnsupportedServerToolTypes 列出国产上游 responses 实现不认识的
+// OpenAI 服务端工具类型。codex 客户端目录默认给所有模型附带原生
 // {"type":"web_search"}，第三方 responses 通道把它原样透传会被整单 400
 // （"The request is invalid. Check the parameters and the message format."），
 // 因此转发前必须剥离；客户端可执行工具（function/custom）原样保留。
-var glmResponsesUnsupportedServerToolTypes = map[string]bool{
+var domesticResponsesUnsupportedServerToolTypes = map[string]bool{
 	"web_search":         true,
 	"web_search_preview": true,
 	"image_generation":   true,
@@ -1708,12 +1728,13 @@ var glmResponsesUnsupportedServerToolTypes = map[string]bool{
 	"local_shell":        true,
 }
 
-// StripGLMResponsesServerSideTools 在 /v1/responses 请求体发往 glm-* 上游前，
-// 从顶层 tools 数组剥离 OpenAI 服务端工具类型。tools 全部被剥离时同步删除
+// StripDomesticResponsesServerSideTools 在 /v1/responses 请求体发往国产家族
+// （glm-* / deepseek-*，含 cn:/global: 路由前缀）上游前，从顶层 tools 数组剥离
+// OpenAI 服务端工具类型。tools 全部被剥离时同步删除
 // tool_choice/parallel_tool_calls（上游会拒绝 "'tool_choice' is only allowed
-// when 'tools' are specified"）。非 GLM 模型与无 tools 的请求原样返回。
-func StripGLMResponsesServerSideTools(body []byte, mappedModel string) ([]byte, bool) {
-	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(mappedModel)), "glm-") {
+// when 'tools' are specified"）。其他模型与无 tools 的请求原样返回。
+func StripDomesticResponsesServerSideTools(body []byte, mappedModel string) ([]byte, bool) {
+	if !isDomesticResponsesCompatModel(mappedModel) {
 		return body, false
 	}
 	tools := gjson.GetBytes(body, "tools")
@@ -1725,7 +1746,7 @@ func StripGLMResponsesServerSideTools(body []byte, mappedModel string) ([]byte, 
 	changed := false
 	for _, item := range tools.Array() {
 		toolType := strings.ToLower(strings.TrimSpace(item.Get("type").String()))
-		if glmResponsesUnsupportedServerToolTypes[toolType] {
+		if domesticResponsesUnsupportedServerToolTypes[toolType] {
 			changed = true
 			continue
 		}
@@ -1762,10 +1783,10 @@ func StripGLMResponsesServerSideTools(body []byte, mappedModel string) ([]byte, 
 	return modified, true
 }
 
-// glmHistoryItemOutputText 把工具调用输出统一拍平成纯文本。codex 的
+// domesticHistoryItemOutputText 把工具调用输出统一拍平成纯文本。codex 的
 // custom_tool_call_output.output 是内容分段数组，local_shell_call.output
 // 兼容字符串与数组两种形态；function_call_output.output 只收字符串。
-func glmHistoryItemOutputText(output gjson.Result) string {
+func domesticHistoryItemOutputText(output gjson.Result) string {
 	if output.IsArray() {
 		parts := make([]string, 0, len(output.Array()))
 		for _, part := range output.Array() {
@@ -1778,10 +1799,10 @@ func glmHistoryItemOutputText(output gjson.Result) string {
 	return output.String()
 }
 
-// glmHistoryFunctionCall 由 codex 历史 item 构造上游可接受的 function_call
-// （GLM 上游拒绝 local_shell_call / custom_tool_call / web_search_call 条目
+// domesticHistoryFunctionCall 由 codex 历史 item 构造上游可接受的 function_call
+// （国产上游拒绝 local_shell_call / custom_tool_call / web_search_call 条目
 // 类型，但 function_call/function_call_output 对可以正常通过）。
-func glmHistoryFunctionCall(id, callID, name string, arguments any) map[string]any {
+func domesticHistoryFunctionCall(id, callID, name string, arguments any) map[string]any {
 	fc := map[string]any{
 		"type":      "function_call",
 		"call_id":   callID,
@@ -1795,7 +1816,7 @@ func glmHistoryFunctionCall(id, callID, name string, arguments any) map[string]a
 	return fc
 }
 
-func glmHistoryMarshalRaw(v map[string]any) json.RawMessage {
+func domesticHistoryMarshalRaw(v map[string]any) json.RawMessage {
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return nil
@@ -1803,7 +1824,8 @@ func glmHistoryMarshalRaw(v map[string]any) json.RawMessage {
 	return raw
 }
 
-// NormalizeGLMResponsesHistoryItems 在 /v1/responses 请求体发往 glm-* 上游前，
+// NormalizeDomesticResponsesHistoryItems 在 /v1/responses 请求体发往国产家族
+// （glm-* / deepseek-*，含 cn:/global: 路由前缀）上游前，
 // 归一化 input 数组里 codex 多轮会话遗留的历史条目：
 //   - reasoning：剥离 encrypted_content（上游拒绝 Fernet 密文，裸 reasoning
 //     与空 summary 条目实测可通过，条目本身保留以维持轮次结构）；
@@ -1813,10 +1835,10 @@ func glmHistoryMarshalRaw(v map[string]any) json.RawMessage {
 //   - web_search_call：直接丢弃（GLM 无该服务端能力，历史里仅是动作记录）。
 //
 // 转换仅依赖 call_id 关联与 output 文本，不猜测其余扩展字段（如
-// internal_chat_message_metadata_passthrough 一律不带过去）。非 GLM 模型、
+// internal_chat_message_metadata_passthrough 一律不带过去）。其他模型、
 // input 非数组（纯字符串输入）或无需改动时原样返回。
-func NormalizeGLMResponsesHistoryItems(body []byte, mappedModel string) ([]byte, bool) {
-	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(mappedModel)), "glm-") {
+func NormalizeDomesticResponsesHistoryItems(body []byte, mappedModel string) ([]byte, bool) {
+	if !isDomesticResponsesCompatModel(mappedModel) {
 		return body, false
 	}
 	input := gjson.GetBytes(body, "input")
@@ -1848,7 +1870,7 @@ func NormalizeGLMResponsesHistoryItems(body []byte, mappedModel string) ([]byte,
 				changed = true // 解析失败宁可丢弃，也不能带着被拒类型透传
 				continue
 			}
-			if raw := glmHistoryMarshalRaw(glmHistoryFunctionCall(item.Get("id").String(), callID, item.Get("name").String(), string(arguments))); raw != nil {
+			if raw := domesticHistoryMarshalRaw(domesticHistoryFunctionCall(item.Get("id").String(), callID, item.Get("name").String(), string(arguments))); raw != nil {
 				out = append(out, raw)
 			}
 			changed = true
@@ -1856,9 +1878,9 @@ func NormalizeGLMResponsesHistoryItems(body []byte, mappedModel string) ([]byte,
 			fco := map[string]any{
 				"type":    "function_call_output",
 				"call_id": item.Get("call_id").String(),
-				"output":  glmHistoryItemOutputText(item.Get("output")),
+				"output":  domesticHistoryItemOutputText(item.Get("output")),
 			}
-			if raw := glmHistoryMarshalRaw(fco); raw != nil {
+			if raw := domesticHistoryMarshalRaw(fco); raw != nil {
 				out = append(out, raw)
 			}
 			changed = true
@@ -1867,13 +1889,13 @@ func NormalizeGLMResponsesHistoryItems(body []byte, mappedModel string) ([]byte,
 			if callID == "" {
 				callID = item.Get("id").String()
 			}
-			if raw := glmHistoryMarshalRaw(glmHistoryFunctionCall(item.Get("id").String(), callID, "shell", item.Get("action").Raw)); raw != nil {
+			if raw := domesticHistoryMarshalRaw(domesticHistoryFunctionCall(item.Get("id").String(), callID, "shell", item.Get("action").Raw)); raw != nil {
 				out = append(out, raw)
 			}
-			if raw := glmHistoryMarshalRaw(map[string]any{
+			if raw := domesticHistoryMarshalRaw(map[string]any{
 				"type":    "function_call_output",
 				"call_id": callID,
-				"output":  glmHistoryItemOutputText(item.Get("output")),
+				"output":  domesticHistoryItemOutputText(item.Get("output")),
 			}); raw != nil {
 				out = append(out, raw)
 			}
@@ -1891,12 +1913,12 @@ func NormalizeGLMResponsesHistoryItems(body []byte, mappedModel string) ([]byte,
 			fco := map[string]any{
 				"type":    "function_call_output",
 				"call_id": item.Get("call_id").String(),
-				"output":  glmHistoryItemOutputText(output),
+				"output":  domesticHistoryItemOutputText(output),
 			}
 			if id := item.Get("id"); id.Exists() {
 				fco["id"] = id.String()
 			}
-			if raw := glmHistoryMarshalRaw(fco); raw != nil {
+			if raw := domesticHistoryMarshalRaw(fco); raw != nil {
 				out = append(out, raw)
 			}
 			changed = true

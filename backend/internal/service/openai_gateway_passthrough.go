@@ -151,14 +151,14 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		}
 	}
 
-	// GLM 上游的 responses 通道不认 OpenAI 服务端工具类型（codex 目录默认给
-	// 所有模型带 web_search），原生透传会被整单 400，剥离后再进各账号归一化。
-	if strippedBody, stripped := StripGLMResponsesServerSideTools(body, reqModel); stripped {
+	// 国产家族上游的 responses 通道不认 OpenAI 服务端工具类型（codex 目录默认
+	// 给所有模型带 web_search），原生透传会被整单 400，剥离后再进各账号归一化。
+	if strippedBody, stripped := StripDomesticResponsesServerSideTools(body, reqModel); stripped {
 		body = strippedBody
 	}
-	// GLM 上游同样拒绝多轮会话遗留的加密 reasoning 与代码模式工具调用条目，
-	// 透传前归一化（Forward 入口已做过，此处幂等兜底其他直连入口）。
-	if historyBody, historyChanged := NormalizeGLMResponsesHistoryItems(body, reqModel); historyChanged {
+	// 国产家族上游同样拒绝多轮会话遗留的加密 reasoning 与代码模式工具调用
+	// 条目，透传前归一化（Forward 入口已做过，此处幂等兜底直连入口）。
+	if historyBody, historyChanged := NormalizeDomesticResponsesHistoryItems(body, reqModel); historyChanged {
 		body = historyBody
 	}
 

@@ -178,7 +178,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		(!strings.EqualFold(strings.TrimSpace(originalModel), strings.TrimSpace(upstreamModel)) &&
 			shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, upstreamModel)) {
 		if isResponsesShape {
-			return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
+			return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body, startTime)
 		}
 		return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 	}
@@ -426,7 +426,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 				zap.String("upstream_message", upstreamMsg),
 			)
 			if isResponsesShape {
-				return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
+				return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body, startTime)
 			}
 			return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 		}
@@ -453,7 +453,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 				zap.String("upstream_message", upstreamMsg),
 			)
 			if isResponsesShape {
-				return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
+				return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body, startTime)
 			}
 			return s.forwardAsRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 		}

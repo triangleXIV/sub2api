@@ -1697,3 +1697,84 @@ func TestNormalizeGLMOpenAIReasoningEffort(t *testing.T) {
 		})
 	}
 }
+
+func TestStripGLMResponsesServerSideTools(t *testing.T) {
+	codexTools := `{"model":"glm-5.3","tools":[{"type":"function","name":"shell","parameters":{"type":"object"}},{"type":"web_search"},{"type":"custom","name":"apply_patch"}],"tool_choice":"auto","parallel_tool_calls":true}`
+	tests := []struct {
+		name       string
+		model      string
+		input      string
+		wantApplied bool
+		wantTools  string // gjson path check: raw JSON of tools, "" means absent
+	}{
+		{
+			name:       "glm strips web_search keeps client tools",
+			model:      "glm-5.3",
+			input:      codexTools,
+			wantApplied: true,
+			wantTools:  `[{"type":"function","name":"shell","parameters":{"type":"object"}},{"type":"custom","name":"apply_patch"}]`,
+		},
+		{
+			name:       "glm-flash uppercase prefix matched case-insensitively",
+			model:      "GLM-5.3-Flash",
+			input:      codexTools,
+			wantApplied: true,
+			wantTools:  `[{"type":"function","name":"shell","parameters":{"type":"object"}},{"type":"custom","name":"apply_patch"}]`,
+		},
+		{
+			name:       "all tools stripped drops tools tool_choice parallel_tool_calls",
+			model:      "glm-5.3-flash",
+			input:      `{"model":"glm-5.3-flash","tools":[{"type":"web_search"}],"tool_choice":"auto","parallel_tool_calls":false}`,
+			wantApplied: true,
+			wantTools:  "",
+		},
+		{
+			name:       "other server side types stripped for glm",
+			model:      "glm-5.3",
+			input:      `{"model":"glm-5.3","tools":[{"type":"image_generation"},{"type":"web_search_preview"},{"type":"code_interpreter"},{"type":"local_shell"},{"type":"function","name":"shell"}]}`,
+			wantApplied: true,
+			wantTools:  `[{"type":"function","name":"shell"}]`,
+		},
+		{
+			name:       "non-glm model untouched",
+			model:      "gpt-6.1-sol",
+			input:      codexTools,
+			wantApplied: false,
+			wantTools:  `[{"type":"function","name":"shell","parameters":{"type":"object"}},{"type":"web_search"},{"type":"custom","name":"apply_patch"}]`,
+		},
+		{
+			name:       "glm without tools untouched",
+			model:      "glm-5.3",
+			input:      `{"model":"glm-5.3","input":"hi"}`,
+			wantApplied: false,
+			wantTools:  "",
+		},
+		{
+			name:       "glm tools without server side entries untouched",
+			model:      "glm-5.3",
+			input:      `{"model":"glm-5.3","tools":[{"type":"function","name":"shell"}]}`,
+			wantApplied: false,
+			wantTools:  `[{"type":"function","name":"shell"}]`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, applied := StripGLMResponsesServerSideTools([]byte(tt.input), tt.model)
+			require.Equal(t, tt.wantApplied, applied)
+			tools := gjson.GetBytes(got, "tools")
+			if tt.wantTools == "" {
+				if tt.wantApplied {
+					require.False(t, tools.Exists())
+					require.False(t, gjson.GetBytes(got, "tool_choice").Exists())
+					require.False(t, gjson.GetBytes(got, "parallel_tool_calls").Exists())
+				}
+				return
+			}
+			require.True(t, tools.Exists())
+			require.JSONEq(t, tt.wantTools, tools.Raw)
+			if tt.wantApplied && gjson.Get(tt.input, "tool_choice").Exists() {
+				require.True(t, gjson.GetBytes(got, "tool_choice").Exists())
+			}
+		})
+	}
+}

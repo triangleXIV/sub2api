@@ -73,6 +73,18 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if legacyIngressChanged {
 		body = legacyIngressBody
 	}
+	// GLM 上游的 Responses 实现不认 OpenAI 服务端工具类型（codex 客户端目录默认
+	// 给所有模型附带 {"type":"web_search"}），透传/原生 Responses 均会整单 400。
+	// 在分流前统一按请求模型与账号映射模型剥离，覆盖 passthrough、原生
+	// Responses、WS 与 Anthropic 全部下游路径；Chat Completions 桥本身也会剥离。
+	requestModelName := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if glmStrippedBody, glmStripped := StripGLMResponsesServerSideTools(body, requestModelName); glmStripped {
+		body = glmStrippedBody
+	} else if glmMappedModel := account.GetMappedModel(requestModelName); glmMappedModel != "" && glmMappedModel != requestModelName {
+		if glmStrippedBody, glmStripped := StripGLMResponsesServerSideTools(body, glmMappedModel); glmStripped {
+			body = glmStrippedBody
+		}
+	}
 	// 在分流到 passthrough / Codex transform / 原生 ChatCompletions 之前统一修正
 	// 显式为 null 的工具 Schema type，否则 upstream 的 400 会被归一成可重试的 502，
 	// 同一份坏定义在账号池里反复重放。
@@ -188,7 +200,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// openai_responses_chat_only_models 显式钉死）时，优先于协议分流走 Chat
 	// Completions 直转，避免再白挨一次上游 400。
 	if shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, reqModel) {
-		return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
+		return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body, startTime)
 	}
 	switch s.resolveUpstreamProtocolFor(ctx, account, APIProtocolResponses, routingModel) {
 	case APIProtocolAnthropic:
@@ -265,7 +277,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// 时，即使账号开启了透传也直接走 Chat Completions 直转，避免白挨一次上游 400。
 	if account.Type == AccountTypeAPIKey &&
 		shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, reqModel) {
-		return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
+		return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body, startTime)
 	}
 	if passthroughEnabled {
 		attemptImageIntentInvalidated := false
@@ -1129,7 +1141,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 					"model", reqModel,
 					"upstream_status", resp.StatusCode,
 				)
-				return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
+				return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body, startTime)
 			}
 			if !agentTaskRecoveryTried && s.isAgentIdentityAccount(ctx, account) && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, respBody) {
 				agentTaskRecoveryTried = true

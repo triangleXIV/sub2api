@@ -1880,6 +1880,26 @@ func NormalizeGLMResponsesHistoryItems(body []byte, mappedModel string) ([]byte,
 			changed = true
 		case "web_search_call":
 			changed = true
+		case "function_call_output":
+			// codex 桌面端把工具输出按内容分段数组下发（output 为
+			// input_text 数组），GLM 上游只接受字符串形态，拍平后重建。
+			output := item.Get("output")
+			if !output.IsArray() {
+				out = append(out, json.RawMessage(item.Raw))
+				continue
+			}
+			fco := map[string]any{
+				"type":    "function_call_output",
+				"call_id": item.Get("call_id").String(),
+				"output":  glmHistoryItemOutputText(output),
+			}
+			if id := item.Get("id"); id.Exists() {
+				fco["id"] = id.String()
+			}
+			if raw := glmHistoryMarshalRaw(fco); raw != nil {
+				out = append(out, raw)
+			}
+			changed = true
 		default:
 			out = append(out, json.RawMessage(item.Raw))
 		}

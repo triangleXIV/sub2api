@@ -85,6 +85,16 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			body = glmStrippedBody
 		}
 	}
+	// GLM 上游同样拒绝 codex 多轮会话的历史条目类型（加密 reasoning、代码模式
+	// shell/custom 工具调用、web_search_call），在分流前归一化为上游可接受的
+	// 形态，覆盖全部下游路径。
+	if glmHistoryBody, glmHistoryChanged := NormalizeGLMResponsesHistoryItems(body, requestModelName); glmHistoryChanged {
+		body = glmHistoryBody
+	} else if glmMappedModel := account.GetMappedModel(requestModelName); glmMappedModel != "" && glmMappedModel != requestModelName {
+		if glmHistoryBody, glmHistoryChanged := NormalizeGLMResponsesHistoryItems(body, glmMappedModel); glmHistoryChanged {
+			body = glmHistoryBody
+		}
+	}
 	// 在分流到 passthrough / Codex transform / 原生 ChatCompletions 之前统一修正
 	// 显式为 null 的工具 Schema type，否则 upstream 的 400 会被归一成可重试的 502，
 	// 同一份坏定义在账号池里反复重放。

@@ -78,20 +78,20 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// 在分流前统一按请求模型与账号映射模型剥离，覆盖 passthrough、原生
 	// Responses、WS 与 Anthropic 全部下游路径；Chat Completions 桥本身也会剥离。
 	requestModelName := strings.TrimSpace(gjson.GetBytes(body, "model").String())
-	if glmStrippedBody, glmStripped := StripGLMResponsesServerSideTools(body, requestModelName); glmStripped {
+	if glmStrippedBody, glmStripped := StripDomesticResponsesServerSideTools(body, requestModelName); glmStripped {
 		body = glmStrippedBody
 	} else if glmMappedModel := account.GetMappedModel(requestModelName); glmMappedModel != "" && glmMappedModel != requestModelName {
-		if glmStrippedBody, glmStripped := StripGLMResponsesServerSideTools(body, glmMappedModel); glmStripped {
+		if glmStrippedBody, glmStripped := StripDomesticResponsesServerSideTools(body, glmMappedModel); glmStripped {
 			body = glmStrippedBody
 		}
 	}
 	// GLM 上游同样拒绝 codex 多轮会话的历史条目类型（加密 reasoning、代码模式
 	// shell/custom 工具调用、web_search_call），在分流前归一化为上游可接受的
 	// 形态，覆盖全部下游路径。
-	if glmHistoryBody, glmHistoryChanged := NormalizeGLMResponsesHistoryItems(body, requestModelName); glmHistoryChanged {
+	if glmHistoryBody, glmHistoryChanged := NormalizeDomesticResponsesHistoryItems(body, requestModelName); glmHistoryChanged {
 		body = glmHistoryBody
 	} else if glmMappedModel := account.GetMappedModel(requestModelName); glmMappedModel != "" && glmMappedModel != requestModelName {
-		if glmHistoryBody, glmHistoryChanged := NormalizeGLMResponsesHistoryItems(body, glmMappedModel); glmHistoryChanged {
+		if glmHistoryBody, glmHistoryChanged := NormalizeDomesticResponsesHistoryItems(body, glmMappedModel); glmHistoryChanged {
 			body = glmHistoryBody
 		}
 	}

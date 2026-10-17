@@ -1698,7 +1698,7 @@ func TestNormalizeGLMOpenAIReasoningEffort(t *testing.T) {
 	}
 }
 
-func TestStripGLMResponsesServerSideTools(t *testing.T) {
+func TestStripDomesticResponsesServerSideTools(t *testing.T) {
 	codexTools := `{"model":"glm-5.3","tools":[{"type":"function","name":"shell","parameters":{"type":"object"}},{"type":"web_search"},{"type":"custom","name":"apply_patch"}],"tool_choice":"auto","parallel_tool_calls":true}`
 	tests := []struct {
 		name       string
@@ -1717,6 +1717,27 @@ func TestStripGLMResponsesServerSideTools(t *testing.T) {
 		{
 			name:       "glm-flash uppercase prefix matched case-insensitively",
 			model:      "GLM-5.3-Flash",
+			input:      codexTools,
+			wantApplied: true,
+			wantTools:  `[{"type":"function","name":"shell","parameters":{"type":"object"}},{"type":"custom","name":"apply_patch"}]`,
+		},
+		{
+			name:       "cn: deepseek routed model strips web_search",
+			model:      "cn:deepseek-v4-flash",
+			input:      codexTools,
+			wantApplied: true,
+			wantTools:  `[{"type":"function","name":"shell","parameters":{"type":"object"}},{"type":"custom","name":"apply_patch"}]`,
+		},
+		{
+			name:       "global: deepseek routed model strips web_search",
+			model:      "global:deepseek-v4.1-flash-sg",
+			input:      codexTools,
+			wantApplied: true,
+			wantTools:  `[{"type":"function","name":"shell","parameters":{"type":"object"}},{"type":"custom","name":"apply_patch"}]`,
+		},
+		{
+			name:       "plain deepseek strips web_search",
+			model:      "deepseek-chat",
 			input:      codexTools,
 			wantApplied: true,
 			wantTools:  `[{"type":"function","name":"shell","parameters":{"type":"object"}},{"type":"custom","name":"apply_patch"}]`,
@@ -1759,7 +1780,7 @@ func TestStripGLMResponsesServerSideTools(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, applied := StripGLMResponsesServerSideTools([]byte(tt.input), tt.model)
+			got, applied := StripDomesticResponsesServerSideTools([]byte(tt.input), tt.model)
 			require.Equal(t, tt.wantApplied, applied)
 			tools := gjson.GetBytes(got, "tools")
 			if tt.wantTools == "" {
@@ -1779,7 +1800,7 @@ func TestStripGLMResponsesServerSideTools(t *testing.T) {
 	}
 }
 
-func TestNormalizeGLMResponsesHistoryItems(t *testing.T) {
+func TestNormalizeDomesticResponsesHistoryItems(t *testing.T) {
 	// 夹具取自 codex 0.163 真实会话 rollout（ChatGPT 桌面端 glm-5.3 多轮对话）。
 	realReasoning := `{"type":"reasoning","id":"rs_0666","summary":[],"encrypted_content":"gAAAAABq02t3M2vQIacit","content":[]}`
 	realCustomCall := `{"type":"custom_tool_call","id":"ctc_00c5","status":"completed","call_id":"call_32MD","name":"exec","input":"const a = 1;","internal_chat_message_metadata_passthrough":{"turn_id":"ebec"}}`
@@ -1843,6 +1864,30 @@ func TestNormalizeGLMResponsesHistoryItems(t *testing.T) {
 			wantTypes:   []string{"message", "message"},
 		},
 		{
+			name:        "cn: deepseek strips encrypted reasoning",
+			model:       "cn:deepseek-v4-pro",
+			input:       `{"model":"cn:deepseek-v4-pro","input":[` + msgUser + `,` + realReasoning + `,` + msgAsst + `]}`,
+			wantApplied: true,
+			wantTypes:   []string{"message", "reasoning", "message"},
+			check: func(t *testing.T, got []byte) {
+				items := gjson.GetBytes(got, "input").Array()
+				require.False(t, items[1].Get("encrypted_content").Exists())
+				require.Equal(t, "rs_0666", items[1].Get("id").String())
+			},
+		},
+		{
+			name:        "global: deepseek converts custom_tool_call pair",
+			model:       "global:deepseek-v4.1-flash",
+			input:       `{"model":"global:deepseek-v4.1-flash","input":[` + msgUser + `,` + realCustomCall + `,` + realCustomOut + `]}`,
+			wantApplied: true,
+			wantTypes:   []string{"message", "function_call", "function_call_output"},
+			check: func(t *testing.T, got []byte) {
+				items := gjson.GetBytes(got, "input").Array()
+				require.Equal(t, "exec", items[1].Get("name").String())
+				require.JSONEq(t, `{"input":"const a = 1;"}`, items[1].Get("arguments").String())
+			},
+		},
+		{
 			name:        "glm flattens array function_call_output",
 			model:       "glm-5.3",
 			input:       `{"model":"glm-5.3","input":[` + msgUser + `,{"type":"function_call","status":"completed","call_id":"c9","name":"exec","arguments":"{\"input\":\"fetch()\"}"},{"type":"function_call_output","call_id":"c9","output":[{"type":"input_text","text":"Script failed"},{"type":"input_text","text":"fetch is not defined"}]}]}`,
@@ -1885,7 +1930,7 @@ func TestNormalizeGLMResponsesHistoryItems(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, applied := NormalizeGLMResponsesHistoryItems([]byte(tt.input), tt.model)
+			got, applied := NormalizeDomesticResponsesHistoryItems([]byte(tt.input), tt.model)
 			require.Equal(t, tt.wantApplied, applied)
 			if !applied {
 				require.Equal(t, tt.input, string(got))

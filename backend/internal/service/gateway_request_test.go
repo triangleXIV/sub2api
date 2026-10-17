@@ -1843,6 +1843,25 @@ func TestNormalizeGLMResponsesHistoryItems(t *testing.T) {
 			wantTypes:   []string{"message", "message"},
 		},
 		{
+			name:        "glm flattens array function_call_output",
+			model:       "glm-5.3",
+			input:       `{"model":"glm-5.3","input":[` + msgUser + `,{"type":"function_call","status":"completed","call_id":"c9","name":"exec","arguments":"{\"input\":\"fetch()\"}"},{"type":"function_call_output","call_id":"c9","output":[{"type":"input_text","text":"Script failed"},{"type":"input_text","text":"fetch is not defined"}]}]}`,
+			wantApplied: true,
+			wantTypes:   []string{"message", "function_call", "function_call_output"},
+			check: func(t *testing.T, got []byte) {
+				items := gjson.GetBytes(got, "input").Array()
+				require.Equal(t, "Script failed\nfetch is not defined", items[2].Get("output").String())
+				require.Equal(t, "c9", items[2].Get("call_id").String())
+			},
+		},
+		{
+			name:        "string function_call_output unchanged",
+			model:       "glm-5.3",
+			input:       `{"model":"glm-5.3","input":[` + msgUser + `,{"type":"function_call_output","call_id":"c8","output":"plain text"}]}`,
+			wantApplied: false,
+			wantTypes:   []string{"message", "function_call_output"},
+		},
+		{
 			name:        "non-glm unchanged",
 			model:       "gpt-6.1-sol",
 			input:       `{"model":"gpt-6.1-sol","input":[` + msgUser + `,` + realReasoning + `]}`,

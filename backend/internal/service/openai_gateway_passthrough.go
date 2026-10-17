@@ -151,6 +151,12 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		}
 	}
 
+	// GLM 上游的 responses 通道不认 OpenAI 服务端工具类型（codex 目录默认给
+	// 所有模型带 web_search），原生透传会被整单 400，剥离后再进各账号归一化。
+	if strippedBody, stripped := StripGLMResponsesServerSideTools(body, reqModel); stripped {
+		body = strippedBody
+	}
+
 	if account != nil && account.UsesOpenAICodexProtocol() {
 		if isOpenAICodexModel(reqModel) && !gjson.GetBytes(body, "instructions").Exists() {
 			nextBody, setErr := sjson.SetBytes(body, "instructions", defaultCodexSynthInstructions(reqModel))
@@ -417,7 +423,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 					"model", reqModel,
 					"upstream_status", resp.StatusCode,
 				)
-				return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
+				return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body, startTime)
 			}
 			if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 				c, account, requestedModel, body, resp.StatusCode, upstreamMsg, probeBody, compactModelFallbackRetried,

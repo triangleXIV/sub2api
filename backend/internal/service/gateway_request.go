@@ -1762,6 +1762,139 @@ func StripGLMResponsesServerSideTools(body []byte, mappedModel string) ([]byte, 
 	return modified, true
 }
 
+// glmHistoryItemOutputText 把工具调用输出统一拍平成纯文本。codex 的
+// custom_tool_call_output.output 是内容分段数组，local_shell_call.output
+// 兼容字符串与数组两种形态；function_call_output.output 只收字符串。
+func glmHistoryItemOutputText(output gjson.Result) string {
+	if output.IsArray() {
+		parts := make([]string, 0, len(output.Array()))
+		for _, part := range output.Array() {
+			if text := part.Get("text").String(); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return output.String()
+}
+
+// glmHistoryFunctionCall 由 codex 历史 item 构造上游可接受的 function_call
+// （GLM 上游拒绝 local_shell_call / custom_tool_call / web_search_call 条目
+// 类型，但 function_call/function_call_output 对可以正常通过）。
+func glmHistoryFunctionCall(id, callID, name string, arguments any) map[string]any {
+	fc := map[string]any{
+		"type":      "function_call",
+		"call_id":   callID,
+		"name":       name,
+		"status":    "completed",
+		"arguments": arguments,
+	}
+	if id != "" {
+		fc["id"] = id
+	}
+	return fc
+}
+
+func glmHistoryMarshalRaw(v map[string]any) json.RawMessage {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// NormalizeGLMResponsesHistoryItems 在 /v1/responses 请求体发往 glm-* 上游前，
+// 归一化 input 数组里 codex 多轮会话遗留的历史条目：
+//   - reasoning：剥离 encrypted_content（上游拒绝 Fernet 密文，裸 reasoning
+//     与空 summary 条目实测可通过，条目本身保留以维持轮次结构）；
+//   - custom_tool_call / custom_tool_call_output：转成 function_call /
+//     function_call_output 对（codex 代码模式的 exec 工具是 custom 形态）；
+//   - local_shell_call：同样转 function_call("shell") + output 对；
+//   - web_search_call：直接丢弃（GLM 无该服务端能力，历史里仅是动作记录）。
+//
+// 转换仅依赖 call_id 关联与 output 文本，不猜测其余扩展字段（如
+// internal_chat_message_metadata_passthrough 一律不带过去）。非 GLM 模型、
+// input 非数组（纯字符串输入）或无需改动时原样返回。
+func NormalizeGLMResponsesHistoryItems(body []byte, mappedModel string) ([]byte, bool) {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(mappedModel)), "glm-") {
+		return body, false
+	}
+	input := gjson.GetBytes(body, "input")
+	if !input.Exists() || !input.IsArray() {
+		return body, false
+	}
+
+	items := input.Array()
+	out := make([]json.RawMessage, 0, len(items))
+	changed := false
+	for _, item := range items {
+		switch item.Get("type").String() {
+		case "reasoning":
+			if !item.Get("encrypted_content").Exists() {
+				out = append(out, json.RawMessage(item.Raw))
+				continue
+			}
+			cleaned, err := sjson.DeleteBytes([]byte(item.Raw), "encrypted_content")
+			if err != nil {
+				out = append(out, json.RawMessage(item.Raw))
+				continue
+			}
+			out = append(out, json.RawMessage(cleaned))
+			changed = true
+		case "custom_tool_call":
+			callID := item.Get("call_id").String()
+			arguments, err := json.Marshal(map[string]any{"input": item.Get("input").String()})
+			if err != nil {
+				changed = true // 解析失败宁可丢弃，也不能带着被拒类型透传
+				continue
+			}
+			if raw := glmHistoryMarshalRaw(glmHistoryFunctionCall(item.Get("id").String(), callID, item.Get("name").String(), string(arguments))); raw != nil {
+				out = append(out, raw)
+			}
+			changed = true
+		case "custom_tool_call_output":
+			fco := map[string]any{
+				"type":    "function_call_output",
+				"call_id": item.Get("call_id").String(),
+				"output":  glmHistoryItemOutputText(item.Get("output")),
+			}
+			if raw := glmHistoryMarshalRaw(fco); raw != nil {
+				out = append(out, raw)
+			}
+			changed = true
+		case "local_shell_call":
+			callID := item.Get("call_id").String()
+			if callID == "" {
+				callID = item.Get("id").String()
+			}
+			if raw := glmHistoryMarshalRaw(glmHistoryFunctionCall(item.Get("id").String(), callID, "shell", item.Get("action").Raw)); raw != nil {
+				out = append(out, raw)
+			}
+			if raw := glmHistoryMarshalRaw(map[string]any{
+				"type":    "function_call_output",
+				"call_id": callID,
+				"output":  glmHistoryItemOutputText(item.Get("output")),
+			}); raw != nil {
+				out = append(out, raw)
+			}
+			changed = true
+		case "web_search_call":
+			changed = true
+		default:
+			out = append(out, json.RawMessage(item.Raw))
+		}
+	}
+	if !changed {
+		return body, false
+	}
+
+	modified, err := sjson.SetBytes(body, "input", out)
+	if err != nil {
+		return body, false
+	}
+	return modified, true
+}
+
 // NormalizeGLM53AnthropicThinking maps explicit client thinking effort onto the
 // GLM-5.3 Anthropic-compatible scale. Requests without an effort or thinking
 // preference are left unchanged so the upstream default remains in effect.

@@ -1778,3 +1778,110 @@ func TestStripGLMResponsesServerSideTools(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeGLMResponsesHistoryItems(t *testing.T) {
+	// 夹具取自 codex 0.163 真实会话 rollout（ChatGPT 桌面端 glm-5.3 多轮对话）。
+	realReasoning := `{"type":"reasoning","id":"rs_0666","summary":[],"encrypted_content":"gAAAAABq02t3M2vQIacit","content":[]}`
+	realCustomCall := `{"type":"custom_tool_call","id":"ctc_00c5","status":"completed","call_id":"call_32MD","name":"exec","input":"const a = 1;","internal_chat_message_metadata_passthrough":{"turn_id":"ebec"}}`
+	realCustomOut := `{"type":"custom_tool_call_output","id":"ctco_01a1","call_id":"call_32MD","output":[{"type":"input_text","text":"Script completed"},{"type":"input_text","text":"Output:\n1"}]}`
+	realWebSearch := `{"type":"web_search_call","id":"ws_0ecc","status":"completed","action":{"type":"open_page","url":"https://example.com/"},"internal_chat_message_metadata_passthrough":{"turn_id":"ebec"}}`
+	msgUser := `{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}`
+	msgAsst := `{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello"}]}`
+
+	tests := []struct {
+		name        string
+		model       string
+		input       string
+		wantApplied bool
+		wantTypes   []string // expected input item types in order
+		check       func(t *testing.T, got []byte)
+	}{
+		{
+			name:        "glm strips encrypted reasoning keeps item",
+			model:       "glm-5.3",
+			input:       `{"model":"glm-5.3","input":[` + msgUser + `,` + realReasoning + `,` + msgAsst + `]}`,
+			wantApplied: true,
+			wantTypes:   []string{"message", "reasoning", "message"},
+			check: func(t *testing.T, got []byte) {
+				items := gjson.GetBytes(got, "input").Array()
+				require.False(t, items[1].Get("encrypted_content").Exists())
+				require.Equal(t, "rs_0666", items[1].Get("id").String())
+			},
+		},
+		{
+			name:        "glm converts custom_tool_call pair to function pair",
+			model:       "glm-5.3",
+			input:       `{"model":"glm-5.3","input":[` + msgUser + `,` + realCustomCall + `,` + realCustomOut + `]}`,
+			wantApplied: true,
+			wantTypes:   []string{"message", "function_call", "function_call_output"},
+			check: func(t *testing.T, got []byte) {
+				items := gjson.GetBytes(got, "input").Array()
+				require.Equal(t, "exec", items[1].Get("name").String())
+				require.Equal(t, "call_32MD", items[1].Get("call_id").String())
+				require.JSONEq(t, `{"input":"const a = 1;"}`, items[1].Get("arguments").String())
+				require.Equal(t, "Script completed\nOutput:\n1", items[2].Get("output").String())
+			},
+		},
+		{
+			name:        "glm converts local_shell_call to function pair",
+			model:       "glm-5.3",
+			input:       `{"model":"glm-5.3","input":[` + msgUser + `,{"type":"local_shell_call","id":"ls_1","status":"completed","action":{"type":"exec","command":["ls"]},"output":"fileA"}]}`,
+			wantApplied: true,
+			wantTypes:   []string{"message", "function_call", "function_call_output"},
+			check: func(t *testing.T, got []byte) {
+				items := gjson.GetBytes(got, "input").Array()
+				require.Equal(t, "shell", items[1].Get("name").String())
+				require.JSONEq(t, `{"type":"exec","command":["ls"]}`, items[1].Get("arguments").String())
+				require.Equal(t, "fileA", items[2].Get("output").String())
+			},
+		},
+		{
+			name:        "glm drops web_search_call",
+			model:       "glm-5.3",
+			input:       `{"model":"glm-5.3","input":[` + msgUser + `,` + realWebSearch + `,` + msgAsst + `]}`,
+			wantApplied: true,
+			wantTypes:   []string{"message", "message"},
+		},
+		{
+			name:        "non-glm unchanged",
+			model:       "gpt-6.1-sol",
+			input:       `{"model":"gpt-6.1-sol","input":[` + msgUser + `,` + realReasoning + `]}`,
+			wantApplied: false,
+			wantTypes:   []string{"message", "reasoning"},
+		},
+		{
+			name:        "string input unchanged",
+			model:       "glm-5.3",
+			input:       `{"model":"glm-5.3","input":"Say OK"}`,
+			wantApplied: false,
+			wantTypes:   nil,
+		},
+		{
+			name:        "glm plain history unchanged",
+			model:       "glm-5.3",
+			input:       `{"model":"glm-5.3","input":[` + msgUser + `,` + msgAsst + `]}`,
+			wantApplied: false,
+			wantTypes:   []string{"message", "message"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, applied := NormalizeGLMResponsesHistoryItems([]byte(tt.input), tt.model)
+			require.Equal(t, tt.wantApplied, applied)
+			if !applied {
+				require.Equal(t, tt.input, string(got))
+				return
+			}
+			if tt.wantTypes != nil {
+				var types []string
+				for _, item := range gjson.GetBytes(got, "input").Array() {
+					types = append(types, item.Get("type").String())
+				}
+				require.Equal(t, tt.wantTypes, types)
+			}
+			if tt.check != nil {
+				tt.check(t, got)
+			}
+		})
+	}
+}

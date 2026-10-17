@@ -156,6 +156,11 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	if strippedBody, stripped := StripGLMResponsesServerSideTools(body, reqModel); stripped {
 		body = strippedBody
 	}
+	// GLM 上游同样拒绝多轮会话遗留的加密 reasoning 与代码模式工具调用条目，
+	// 透传前归一化（Forward 入口已做过，此处幂等兜底其他直连入口）。
+	if historyBody, historyChanged := NormalizeGLMResponsesHistoryItems(body, reqModel); historyChanged {
+		body = historyBody
+	}
 
 	if account != nil && account.UsesOpenAICodexProtocol() {
 		if rejectReason := detectOpenAIPassthroughInstructionsRejectReason(reqModel, body); rejectReason != "" {

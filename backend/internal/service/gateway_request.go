@@ -1695,6 +1695,73 @@ func normalizeGLMOpenAIReasoningEffort(raw string) string {
 	}
 }
 
+// glmResponsesUnsupportedServerToolTypes 列出 GLM 上游 responses 实现不认识的
+// OpenAI 服务端工具类型。codex 客户端目录默认给所有路由模型附带原生
+// {"type":"web_search"}，第三方 responses 通道把它原样透传会被整单 400
+// （"The request is invalid. Check the parameters and the message format."），
+// 因此转发前必须剥离；客户端可执行工具（function/custom）原样保留。
+var glmResponsesUnsupportedServerToolTypes = map[string]bool{
+	"web_search":         true,
+	"web_search_preview": true,
+	"image_generation":   true,
+	"code_interpreter":   true,
+	"local_shell":        true,
+}
+
+// StripGLMResponsesServerSideTools 在 /v1/responses 请求体发往 glm-* 上游前，
+// 从顶层 tools 数组剥离 OpenAI 服务端工具类型。tools 全部被剥离时同步删除
+// tool_choice/parallel_tool_calls（上游会拒绝 "'tool_choice' is only allowed
+// when 'tools' are specified"）。非 GLM 模型与无 tools 的请求原样返回。
+func StripGLMResponsesServerSideTools(body []byte, mappedModel string) ([]byte, bool) {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(mappedModel)), "glm-") {
+		return body, false
+	}
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return body, false
+	}
+
+	kept := make([]json.RawMessage, 0, len(tools.Array()))
+	changed := false
+	for _, item := range tools.Array() {
+		toolType := strings.ToLower(strings.TrimSpace(item.Get("type").String()))
+		if glmResponsesUnsupportedServerToolTypes[toolType] {
+			changed = true
+			continue
+		}
+		kept = append(kept, json.RawMessage(item.Raw))
+	}
+	if !changed {
+		return body, false
+	}
+
+	if len(kept) == 0 {
+		modified, err := sjson.DeleteBytes(body, "tools")
+		if err != nil {
+			return body, false
+		}
+		if gjson.GetBytes(modified, "tool_choice").Exists() {
+			modified, err = sjson.DeleteBytes(modified, "tool_choice")
+			if err != nil {
+				return body, false
+			}
+		}
+		if gjson.GetBytes(modified, "parallel_tool_calls").Exists() {
+			modified, err = sjson.DeleteBytes(modified, "parallel_tool_calls")
+			if err != nil {
+				return body, false
+			}
+		}
+		return modified, true
+	}
+
+	modified, err := sjson.SetBytes(body, "tools", kept)
+	if err != nil {
+		return body, false
+	}
+	return modified, true
+}
+
 // NormalizeGLM53AnthropicThinking maps explicit client thinking effort onto the
 // GLM-5.3 Anthropic-compatible scale. Requests without an effort or thinking
 // preference are left unchanged so the upstream default remains in effect.

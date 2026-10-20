@@ -13,10 +13,9 @@ import (
 // ModelPlazaHandler 处理「模型广场」查询。
 //
 // 广场路由挂 OptionalJWT 中间件：匿名可访问（除非 require_auth 开启），带 token 则
-// 识别用户。可见性规则（橱窗语义，与「可用渠道」的可绑定语义不同）：
-//   - 匿名：仅非专属分组（订阅型照常展示）；
-//   - 登录：非专属分组 + user_allowed_groups 授权或持有有效订阅的专属分组；
-//     若该用户开启了公开分组限制，则公开分组同样需要落在授权集合内。
+// 识别用户。可见性规则（橱窗语义）：直接镜像管理员配置的活跃分组，对所有访问者
+// 一视同仁——专属分组照常展示（带专属徽章），不做登录态/授权裁剪；登录用户仅
+// 额外合并其专属倍率用于展示。
 type ModelPlazaHandler struct {
 	plazaService   *service.ModelPlazaService
 	apiKeyService  *service.APIKeyService
@@ -130,59 +129,26 @@ func (h *ModelPlazaHandler) Get(c *gin.Context) {
 		return
 	}
 
-	// allowedGroups == nil 表示匿名；登录用户恒为非 nil（可能为空集合）。
-	var allowedGroups map[int64]struct{}
-	var restrictPublicGroups bool
+	// 登录用户额外合并专属倍率（仅展示增强，失败降级为分组默认倍率）；
+	// 分组本身不再做登录态/授权裁剪，匿名与登录看到同一份管理员分组。
 	var userRates map[int64]float64
 	if authed {
-		allowedGroups, restrictPublicGroups, err = h.apiKeyService.GetUserGroupVisibility(c.Request.Context(), subject.UserID)
-		if err != nil {
-			// 可见性数据拿不到时不能静默降级成匿名视图（会错漏专属分组），直接报错。
-			response.ErrorFrom(c, err)
-			return
-		}
+		var err error
 		userRates, err = h.apiKeyService.GetUserGroupRates(c.Request.Context(), subject.UserID)
 		if err != nil {
-			// 专属倍率仅是展示增强，失败降级为分组默认倍率。
 			slog.Warn("model_plaza_user_rates_failed", "error", err, "user_id", subject.UserID)
 			userRates = nil
 		}
 	}
 
-	visible := filterPlazaVisibleGroups(groups, allowedGroups, restrictPublicGroups)
-
 	// 广场可匿名访问，分组文案随请求语言变化，提示中间缓存按语言区分。
 	// 追加而非覆盖：CORS 中间件已为具体来源写入 Vary: Origin。
 	c.Writer.Header().Add("Vary", "Accept-Language")
-	out := toLocalizedModelPlazaGroups(visible, userRates, c.GetHeader("Accept-Language"))
+	out := toLocalizedModelPlazaGroups(groups, userRates, c.GetHeader("Accept-Language"))
 	response.Success(c, modelPlazaResponse{
 		Description: rt.Description,
 		Groups:      out,
 	})
-}
-
-// filterPlazaVisibleGroups 按登录态裁剪分组可见性。
-// allowedGroups == nil 表示匿名（仅非专属）；非 nil 包含普通授权及有效订阅分组。
-// restrictPublicGroups 为 true 时，公开分组也必须落在 allowedGroups 内，否则用户会
-// 在广场看到自己实际绑定不了的分组。
-func filterPlazaVisibleGroups(
-	groups []service.PlazaGroup,
-	allowedGroups map[int64]struct{},
-	restrictPublicGroups bool,
-) []service.PlazaGroup {
-	visible := make([]service.PlazaGroup, 0, len(groups))
-	for _, g := range groups {
-		if g.IsExclusive || (restrictPublicGroups && allowedGroups != nil) {
-			if allowedGroups == nil {
-				continue
-			}
-			if _, ok := allowedGroups[g.ID]; !ok {
-				continue
-			}
-		}
-		visible = append(visible, g)
-	}
-	return visible
 }
 
 // toLocalizedModelPlazaGroups 转换可见分组，并把名称与描述换成请求首选语言的版本。

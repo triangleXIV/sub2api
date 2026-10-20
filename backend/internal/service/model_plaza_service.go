@@ -92,6 +92,8 @@ func NewModelPlazaService(
 
 // ListGroups 返回模型广场数据：每个活跃分组附带其可用模型与定价。
 //
+// 直接镜像管理员配置的活跃分组：不做登录态/授权裁剪，也不按模型数过滤——
+// 暂无可用模型的分组照常返回（前端展示「暂无可用模型」占位）。
 // 模型枚举口径与 ListAvailable 一致（Active 渠道、SupportedModels ∪ 全局定价回落、
 // 平台隔离），仅把顶层从渠道换成分组：
 //   - 渠道按 lower(name) 排序后遍历，保证同名模型去重结果确定；
@@ -99,10 +101,7 @@ func NewModelPlazaService(
 //   - token 模型的单价与阶梯按实收口径合成（见 ResolveContextPricingSchedule），
 //     图片计费模型的档位价按实收口径合成（见 plazaImageDisplayPricing）；
 //   - 每个模型附带官方参考价（查不到为 nil）；
-//   - 只返回 Models 非空的分组；分组按 RateMultiplier 升序（同倍率按名称），
-//     组内模型按名称排序。
-//
-// 可见性过滤（专属分组）不在此层做，由 handler 按登录态裁剪。
+//   - 分组按 RateMultiplier 升序（同倍率按名称），组内模型按名称排序。
 func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error) {
 	channels, err := s.channelRepo.ListAll(ctx)
 	if err != nil {
@@ -201,9 +200,6 @@ func (s *ModelPlazaService) ListGroups(ctx context.Context) ([]PlazaGroup, error
 	out := make([]PlazaGroup, 0, len(order))
 	for _, gid := range order {
 		pg := byGroup[gid]
-		if len(pg.Models) == 0 {
-			continue
-		}
 		sort.SliceStable(pg.Models, func(i, j int) bool {
 			if pg.Models[i].Name != pg.Models[j].Name {
 				return pg.Models[i].Name < pg.Models[j].Name

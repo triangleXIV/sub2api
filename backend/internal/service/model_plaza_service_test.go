@@ -36,7 +36,7 @@ func plazaPricedChannel(id int64, name string, groupIDs []int64, platform string
 }
 
 func TestListPlazaGroups_GroupCentricAggregation(t *testing.T) {
-	// 两个渠道挂同一分组:模型并入同一 PlazaGroup;无模型的分组不返回。
+	// 两个渠道挂同一分组:模型并入同一 PlazaGroup;空模型分组照常返回(直接镜像管理员分组)。
 	channels := []Channel{
 		plazaPricedChannel(1, "chA", []int64{10}, "anthropic", "claude-sonnet"),
 		plazaPricedChannel(2, "chB", []int64{10}, "anthropic", "claude-opus"),
@@ -48,13 +48,16 @@ func TestListPlazaGroups_GroupCentricAggregation(t *testing.T) {
 	svc := newPlazaService(channels, groups, nil)
 	out, err := svc.ListGroups(context.Background())
 	require.NoError(t, err)
-	require.Len(t, out, 1, "无模型的分组不应返回")
-	require.Equal(t, int64(10), out[0].ID)
-	require.Equal(t, "desc", out[0].Description)
-	require.Len(t, out[0].Models, 2)
+	require.Len(t, out, 2, "空模型分组也照常返回")
+	// 分组按倍率升序:0.5 的 g-empty 在前,模型为空。
+	require.Equal(t, int64(20), out[0].ID)
+	require.Empty(t, out[0].Models)
+	require.Equal(t, int64(10), out[1].ID)
+	require.Equal(t, "desc", out[1].Description)
+	require.Len(t, out[1].Models, 2)
 	// 组内模型按名称排序
-	require.Equal(t, "claude-opus", out[0].Models[0].Name)
-	require.Equal(t, "claude-sonnet", out[0].Models[1].Name)
+	require.Equal(t, "claude-opus", out[1].Models[0].Name)
+	require.Equal(t, "claude-sonnet", out[1].Models[1].Name)
 }
 
 func TestListPlazaGroups_Fable51HasNoImplicitReasoningMultiplier(t *testing.T) {
@@ -185,7 +188,9 @@ func TestListPlazaGroups_InactiveChannelSkipped(t *testing.T) {
 	svc := newPlazaService([]Channel{inactive}, groups, nil)
 	out, err := svc.ListGroups(context.Background())
 	require.NoError(t, err)
-	require.Empty(t, out)
+	// 非活跃渠道不参与模型枚举:分组本身仍返回(直接镜像管理员分组),但模型为空。
+	require.Len(t, out, 1)
+	require.Empty(t, out[0].Models)
 }
 
 func TestListPlazaGroups_SortedByRateMultiplierAsc(t *testing.T) {

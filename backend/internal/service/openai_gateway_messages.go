@@ -72,10 +72,11 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	if account.IsOpenCodeGo() && IsOpenCodeUnsupportedModel(routingModel) {
 		return nil, writeOpenCodeUnsupportedModelError(c, true, routingModel)
 	}
-	// 模型级 Responses 能力门：已学习到该模型不支持 /v1/responses（或管理员通过
-	// openai_responses_chat_only_models 显式钉死）时，优先于协议分流将 Messages
-	// 直接转 CC，避免再白挨一次上游 400。
-	if shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account, msgBodyModel) {
+	// 模型级 Responses 能力门（仅模型级信号：管理员钉死清单 + 已学习的 chat-only
+	// 模型）：命中时优先于协议分流将 Messages 直接转 CC，避免再白挨一次上游 400。
+	// 账号级 adaptive 国产回退不在此处生效——按入站协议分流的账号交由下方协议
+	// 分流决定（如 GLM adaptive 走原生 Anthropic 直通），与上游语义一致。
+	if shouldRouteMessagesViaChatCompletionsForModel(account, msgBodyModel) {
 		return s.forwardAnthropicViaRawChatCompletions(ctx, c, account, body, defaultMappedModel)
 	}
 	switch s.resolveUpstreamProtocolFor(ctx, account, APIProtocolAnthropic, routingModel) {

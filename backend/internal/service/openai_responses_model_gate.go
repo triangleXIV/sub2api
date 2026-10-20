@@ -123,6 +123,23 @@ func shouldForwardOpenAIResponsesViaRawChatCompletionsForModel(account *Account,
 	return isOpenAIResponsesModelChatOnly(account.ID, model)
 }
 
+// shouldRouteMessagesViaChatCompletionsForModel 判断 /v1/messages 入口是否应在协议
+// 分流前直接经 Chat Completions 直转。只看模型级信号（管理员钉死清单 + 进程内
+// 学习结果），不看账号级回退——账号级 shouldForwardOpenAIResponsesViaRawChat
+// Completions 中的 adaptive 国产回退（如 GLM 无原生 Responses → CC）只约束
+// /v1/responses 链路；按入站协议分流的账号在 messages 入口由 resolveUpstream
+// Protocol 决定（如 GLM adaptive 走原生 Anthropic 直通），与上游语义一致。
+// 非按入站分流的账号不受影响：账号级 chat 信号仍经协议分流生效。
+func shouldRouteMessagesViaChatCompletionsForModel(account *Account, model string) bool {
+	if account == nil || account.Type != AccountTypeAPIKey {
+		return false
+	}
+	if openAIResponsesChatOnlyExplicit(account, model) {
+		return true
+	}
+	return isOpenAIResponsesModelChatOnly(account.ID, model)
+}
+
 // isOpenAIResponsesNotSupportedUpstreamError 识别上游「模型不支持 Responses API」
 // 的确定性拒绝。匹配模式（大小写不敏感）：
 //   - "当前模型不支持 responses api"（中文中转站常见文案）

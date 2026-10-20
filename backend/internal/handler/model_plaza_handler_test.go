@@ -17,63 +17,51 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func plazaGroups() []service.PlazaGroup {
-	return []service.PlazaGroup{
+type plazaAdminGroupsRepo struct{ service.GroupRepository }
+
+func (plazaAdminGroupsRepo) ListActive(context.Context) ([]service.Group, error) {
+	return []service.Group{
 		{ID: 1, Name: "public-standard", Platform: "anthropic", SubscriptionType: "standard", RateMultiplier: 1},
 		{ID: 2, Name: "exclusive-a", Platform: "anthropic", IsExclusive: true, RateMultiplier: 0.5},
-		{ID: 3, Name: "public-subscription", Platform: "openai", SubscriptionType: "subscription", RateMultiplier: 1},
-		{ID: 4, Name: "exclusive-b", Platform: "openai", IsExclusive: true, RateMultiplier: 0.8},
+	}, nil
+}
+
+func TestModelPlazaHandler_ShowsAllAdminGroupsToAnonymous(t *testing.T) {
+	// 广场直接镜像管理员配置的分组:匿名也能看到专属分组,不再按登录态/授权裁剪。
+	gin.SetMode(gin.TestMode)
+	h := NewModelPlazaHandler(
+		service.NewModelPlazaService(plazaVaryChannelRepo{}, plazaAdminGroupsRepo{}, nil, nil, nil),
+		nil,
+		service.NewSettingService(plazaVarySettingRepo{}, &config.Config{}),
+	)
+	r := gin.New()
+	r.GET("/api/v1/model-plaza", h.Get)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/model-plaza", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var body struct {
+		Code int `json:"code"`
+		Data struct {
+			Groups []struct {
+				Name        string `json:"name"`
+				IsExclusive bool   `json:"is_exclusive"`
+			} `json:"groups"`
+		} `json:"data"`
 	}
-}
-
-func TestFilterPlazaVisibleGroups_AnonymousSeesOnlyNonExclusive(t *testing.T) {
-	// 匿名(allowedExclusive == nil):仅非专属分组;订阅型公开分组照常可见(橱窗语义)。
-	visible := filterPlazaVisibleGroups(plazaGroups(), nil, false)
-	require.Len(t, visible, 2)
-	ids := []int64{visible[0].ID, visible[1].ID}
-	require.ElementsMatch(t, []int64{1, 3}, ids)
-}
-
-func TestFilterPlazaVisibleGroups_AuthedSeesGrantedExclusive(t *testing.T) {
-	// 登录:非专属 + 授权的专属;未授权的专属仍不可见。
-	allowed := map[int64]struct{}{2: {}}
-	visible := filterPlazaVisibleGroups(plazaGroups(), allowed, false)
-	require.Len(t, visible, 3)
-	ids := make([]int64, 0, len(visible))
-	for _, g := range visible {
-		ids = append(ids, g.ID)
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Equal(t, 0, body.Code)
+	require.Len(t, body.Data.Groups, 2, "公开分组与专属分组都应返回")
+	names := []string{body.Data.Groups[0].Name, body.Data.Groups[1].Name}
+	require.ElementsMatch(t, []string{"public-standard", "exclusive-a"}, names)
+	for _, g := range body.Data.Groups {
+		if g.Name == "exclusive-a" {
+			require.True(t, g.IsExclusive, "专属分组应原样带出专属标记")
+		}
 	}
-	require.ElementsMatch(t, []int64{1, 2, 3}, ids)
-}
-
-func TestFilterPlazaVisibleGroups_AuthedEmptySetSeesNoExclusive(t *testing.T) {
-	// 登录但无任何专属授权(空集合,非 nil):与匿名同样只见非专属,
-	// 但语义区分要保持——空集合不能被当作 nil 匿名分支。
-	visible := filterPlazaVisibleGroups(plazaGroups(), map[int64]struct{}{}, false)
-	require.Len(t, visible, 2)
-}
-
-func TestFilterPlazaVisibleGroups_RestrictedUserSeesOnlyGrantedPublic(t *testing.T) {
-	// 开启公开分组限制后，公开分组也必须落在授权集合内，否则用户会在广场
-	// 看到自己实际绑定不了的分组。
-	allowed := map[int64]struct{}{1: {}, 2: {}}
-	visible := filterPlazaVisibleGroups(plazaGroups(), allowed, true)
-	ids := make([]int64, 0, len(visible))
-	for _, g := range visible {
-		ids = append(ids, g.ID)
-	}
-	// 3 是未授权的公开分组，受限后不可见；4 是未授权的专属分组，一贯不可见。
-	require.ElementsMatch(t, []int64{1, 2}, ids)
-}
-
-func TestFilterPlazaVisibleGroups_RestrictionDoesNotAffectAnonymous(t *testing.T) {
-	// 匿名没有用户记录，限制标志无从谈起，可见性必须与未受限时一致。
-	visible := filterPlazaVisibleGroups(plazaGroups(), nil, true)
-	ids := make([]int64, 0, len(visible))
-	for _, g := range visible {
-		ids = append(ids, g.ID)
-	}
-	require.ElementsMatch(t, []int64{1, 3}, ids)
 }
 
 func TestModelPlazaHandler_NilSettingServiceFailsClosed404(t *testing.T) {
@@ -250,20 +238,6 @@ func TestToModelPlazaGroupDTO_TimePricing(t *testing.T) {
 	weekdaysModel := decoded["models"].([]any)[1].(map[string]any)
 	weekdaysTP := weekdaysModel["time_pricing"].(map[string]any)
 	require.Equal(t, true, weekdaysTP["weekdays_only"])
-}
-
-func TestFilterPlazaVisibleGroups_SubscribedExclusiveGroup(t *testing.T) {
-	groups := []service.PlazaGroup{
-		{ID: 42, IsExclusive: true, SubscriptionType: "subscription"},
-		{ID: 43, IsExclusive: true, SubscriptionType: "subscription"},
-		{ID: 44, IsExclusive: true, SubscriptionType: "standard"},
-	}
-	require.Empty(t, filterPlazaVisibleGroups(groups, nil, false))
-	for _, restricted := range []bool{false, true} {
-		visible := filterPlazaVisibleGroups(groups, map[int64]struct{}{42: {}}, restricted)
-		require.Len(t, visible, 1)
-		require.Equal(t, int64(42), visible[0].ID)
-	}
 }
 
 type plazaVarySettingRepo struct{ service.SettingRepository }

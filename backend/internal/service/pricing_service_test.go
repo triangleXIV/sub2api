@@ -1354,3 +1354,23 @@ func TestBillingService_AntigravityClaude55TierFallbacksUseBaseRates(t *testing.
 		}
 	}
 }
+
+func TestBillingService_GPT61TerraPricing(t *testing.T) {
+	svc := NewBillingService(&config.Config{}, nil)
+	p, err := svc.GetModelPricing("gpt-6.1-terra")
+	require.NoError(t, err)
+	require.NotNil(t, p)
+	require.InDelta(t, 1e-6, p.InputPricePerToken, 1e-12, "input $1/1M")
+	require.InDelta(t, 5e-6, p.OutputPricePerToken, 1e-12, "output $5/1M")
+	require.InDelta(t, 5e-8, p.CacheReadPricePerToken, 1e-12, "cache read $0.05/1M")
+	require.InDelta(t, 1.25e-6, p.CacheCreationPricePerToken, 1e-12, "cache write $1.25/1M")
+	require.InDelta(t, 2e-6, p.InputPricePerTokenPriority, 1e-12, "priority input $2/1M")
+	require.InDelta(t, 10e-6, p.OutputPricePerTokenPriority, 1e-12, "priority output $10/1M")
+
+	ratio := openAIModelFastPricingRatio("gpt-6.1-terra")
+	require.Equal(t, 2.0, ratio)
+
+	require.Equal(t, "gpt-6.1-terra", normalizeKnownOpenAICodexModel("gpt-6.1-terra"))
+	require.Equal(t, "gpt-6.1-terra", normalizeKnownOpenAICodexModel("gpt-6.1-terra-high"))
+	require.Equal(t, "gpt-6.1-terra", normalizeKnownOpenAICodexModel("openai/gpt-6.1-terra"))
+}

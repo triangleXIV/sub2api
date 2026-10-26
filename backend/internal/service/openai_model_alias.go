@@ -40,6 +40,9 @@ func normalizeKnownOpenAICodexModel(model string) string {
 	if openai.IsGPT61SolModelSpelling(normalized) {
 		return "gpt-6.1-sol"
 	}
+	if openai.IsGPT61TerraModelSpelling(normalized) {
+		return "gpt-6.1-terra"
+	}
 	if openai.IsGPT6SolOrLunaModelSpelling(normalized) {
 		if strings.HasPrefix(normalized, "gpt-6-sol") {
 			return "gpt-6-sol"
@@ -54,6 +57,8 @@ func normalizeKnownOpenAICodexModel(model string) string {
 		return "gpt-5.6-sol"
 	case strings.Contains(normalized, "gpt-5.6-terra"):
 		return "gpt-5.6-terra"
+	case strings.Contains(normalized, "gpt-6.1-terra"):
+		return "gpt-6.1-terra"
 	case strings.Contains(normalized, "gpt-5.6-luna"):
 		return "gpt-5.6-luna"
 	case normalized == "gpt-5.6":

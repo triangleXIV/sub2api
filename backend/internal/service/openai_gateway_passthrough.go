@@ -357,6 +357,12 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	responseID := ""
 	imageCount := 0
 	var imageOutputSizes []string
+	var cancelStream context.CancelCauseFunc
+	defer func() {
+		if cancelStream != nil {
+			cancelStream(nil)
+		}
+	}()
 	for {
 		actualModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 		if actualModel == "" {
@@ -364,6 +370,14 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		}
 		SetOpsUpstreamModel(c, actualModel)
 		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
+		if cancelStream != nil {
+			cancelStream(nil)
+		}
+		var idle *openAIPassthroughStreamIdle
+		if reqStream && !imageIntent && account.Platform == PlatformOpenAI && s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
+			upstreamCtx, cancelStream = context.WithCancelCause(upstreamCtx)
+			idle = newOpenAIPassthroughStreamIdle(upstreamCtx, cancelStream, time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout)*time.Second)
+		}
 		syncOpenAIResponsesInstructionsEcho(c, body)
 		upstreamReq, buildErr := s.buildUpstreamRequestOpenAIPassthrough(upstreamCtx, c, account, body, token)
 		releaseUpstreamCtx()
@@ -443,7 +457,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		}
 
 		if reqStream {
-			result, handleErr := s.handleStreamingResponsePassthrough(ctx, resp, c, account, startTime, reqModel, upstreamPassthroughModel)
+			result, handleErr := s.handleStreamingResponsePassthrough(ctx, resp, c, account, startTime, reqModel, upstreamPassthroughModel, idle)
 			if handleErr != nil {
 				if retryBody, fallbackModel, retry := s.applyOpenAIPassthroughCompactFallbackFromSignal(
 					c, account, requestedModel, body, handleErr, compactModelFallbackRetried, resp,
@@ -1899,7 +1913,15 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	startTime time.Time,
 	originalModel string,
 	mappedModel string,
+	idleGuard ...*openAIPassthroughStreamIdle,
 ) (*openaiStreamingResultPassthrough, error) {
+	var idle *openAIPassthroughStreamIdle
+	if len(idleGuard) > 0 {
+		idle = idleGuard[0]
+	}
+	if idle != nil {
+		defer idle.stop()
+	}
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
@@ -1990,6 +2012,8 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 	// flushPending 表示已写入但未到 SSE 空行边界的脏状态；defer 兜底函数退出前的残留，断连后不再 Flush。
 	flushPending := false
 	pendingSSEEventType := ""
+	frameHasProgress := false
+	var lastSequence int64
 	flushPendingOutput := func() {
 		if clientDisconnected || !flushPending {
 			return
@@ -2097,6 +2121,12 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 				}
 			}
 			eventType := effectiveOpenAISSEEventType(dataBytes, rawEventType)
+			if idle != nil && trimmedData != "" && eventType != "" && eventType != "ping" && eventType != "keepalive" {
+				frameHasProgress = true
+				if seq := gjson.GetBytes(dataBytes, "sequence_number").Int(); seq > lastSequence {
+					lastSequence = seq
+				}
+			}
 			createdAtTracker.Observe(dataBytes, eventType)
 			if codexFailureTerminal && sawBareError && !sawResponseFailed && eventType != "response.failed" {
 				suppressCurrentEvent = true
@@ -2236,6 +2266,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		if line == "" {
 			pendingSSEEventType = ""
 			if suppressCurrentEvent {
+				frameHasProgress = false
 				suppressCurrentEvent = false
 				responseFailedPending = false
 				continue
@@ -2272,6 +2303,12 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			responseFailedPending = false
 			failureDelivered = true
 		}
+		if line == "" {
+			if idle != nil && frameHasProgress && clientOutputStarted && !clientDisconnected && !sawDone && !sawTerminalEvent {
+				idle.progress()
+			}
+			frameHasProgress = false
+		}
 		// Terminal 事件（response.completed / [DONE] 等）随空行完整刷出后不再等上游
 		// EOF：上游在 keep-alive/HTTP2 复用连接上可能拖延关闭连接（观测到 8~46s 不等），
 		// 空等期间只能靠 keepalive 维持，白白拉长尾延迟。usage 已在 terminal 事件中解析。
@@ -2282,6 +2319,27 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 		}
 	}
 	ensureResponseFailedTerminal()
+	if idle != nil && idle.expired() && !sawDone && !sawTerminalEvent && !sawFailedEvent {
+		const message = "Upstream response stream stalled; please retry"
+		if !clientDisconnected && ctx.Err() == nil && (c.Request == nil || c.Request.Context().Err() == nil) {
+			// Finish the current frame before writing a terminal event. The gateway
+			// never replays a request whose partial response has been sent.
+			if flushPending {
+				_, _ = fmt.Fprintln(w)
+			}
+			source := fmt.Appendf(nil, "{\"error\":{\"code\":\"server_error\"},\"sequence_number\":%d}", lastSequence+1)
+			if _, err := fmt.Fprint(w, buildOpenAIResponseFailedSSE(responseID, originalModel, createdAtTracker.Value(), source, message)); err == nil {
+				flushPending = false
+				flusher.Flush()
+				MarkResponseCommitted(c)
+				MarkOpsStreamFailure(c, "upstream_error", "stream_idle_timeout", message, http.StatusGatewayTimeout)
+			}
+		}
+		logger.FromContext(ctx).Warn("openai.passthrough_stream_idle_timeout",
+			zap.Int64("account_id", account.ID), zap.String("model", originalModel),
+			zap.Duration("stream_idle_timeout", idle.interval), zap.String("upstream_request_id", upstreamRequestID))
+		return resultWithUsage(), fmt.Errorf("upstream response failed: %w", errOpenAIPassthroughStreamIdle)
+	}
 	if err := documentScanner.Err(); err != nil {
 		if (sawDone || sawTerminalEvent) && !sawFailedEvent {
 			s.clearOpenAIProxyStreamDisconnect(account)
